@@ -3,4 +3,6 @@ __pycache__/
 *.pyc
 build/third_party/
 build/pyinstaller-work/
+build/pyinstaller-work-*/
+dist-*/
 src/ovb_rc003/frida_assets/*.xz
