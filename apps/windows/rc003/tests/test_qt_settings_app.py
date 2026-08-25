@@ -31,6 +31,7 @@ from unittest import mock
 
 from ovb_rc003 import (
     audio_output,
+    autostart_windows,
     bridge_launcher,
     config,
     device_catalog,
@@ -81,6 +82,112 @@ if _HAS_PYSIDE6:
 
 
 _SKIP_REASON = "PySide6-Essentials not installed - Qt settings UI not verified here"
+
+
+class QmlTextAndAutostartContractTests(unittest.TestCase):
+    def test_text_menu_editor_uses_the_requested_compact_placeholders(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ButtonsPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('placeholderText: qsTr("标题")', source)
+        self.assertIn('placeholderText: qsTr("文本")', source)
+        self.assertNotIn('placeholderText: qsTr("菜单名称")', source)
+        self.assertNotIn('placeholderText: qsTr("实际输入文本")', source)
+
+    def test_connection_page_exposes_the_user_controlled_autostart_toggle(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "autostartCheck"', source)
+        self.assertIn('checked: SettingsController.autostartEnabled', source)
+        self.assertIn(
+            'onToggled: SettingsController.setAutostartEnabled(checked)', source
+        )
+
+    def test_connection_page_exposes_on_demand_system_microphone_release(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "unifiedOnDemandCheck"', source)
+        self.assertIn('checked: SettingsController.unifiedOnDemandEnabled', source)
+        self.assertIn(
+            'onToggled: SettingsController.unifiedOnDemandEnabled = checked', source
+        )
+        self.assertIn("没有软件使用时，关闭电脑麦克风", source)
+        self.assertIn("SettingsController.selectedEndpointSupportsOnDemand", source)
+
+    def test_connection_page_supports_manual_and_recorded_voice_hotkeys(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "hotkeyField"', source)
+        self.assertIn('objectName: "recordVoiceHotkeyButton"', source)
+        self.assertIn('objectName: "voiceHotkeyRecorderDialog"', source)
+        self.assertIn("SettingsController.startHotkeyCapture()", source)
+        self.assertIn("SettingsController.stopHotkeyCapture()", source)
+        self.assertIn("SettingsController.hotkeyText = chord", source)
+
+    def test_connection_page_has_compact_task_order_and_one_persistent_action_bar(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        ordered_titles = (
+            "设备与运行状态",
+            "虚拟音频桥接",
+            "遥控器语音控制",
+            "运行与启动",
+        )
+        title_offsets = [source.index(title) for title in ordered_titles]
+        self.assertEqual(title_offsets, sorted(title_offsets))
+        self.assertIn('objectName: "connectionActionBar"', source)
+        self.assertIn('objectName: "connectionSaveButton"', source)
+        self.assertIn("SettingsController.bridgeActionText", source)
+        self.assertIn('text: qsTr("桥接到")', source)
+        self.assertIn('objectName: "showAllAudioEndpointsButton"', source)
+        self.assertIn("SettingsController.endpointBridgeHelpText", source)
+        self.assertNotIn("SettingsController.selectedDeviceDescription", source)
+        self.assertNotIn("The Windows client has a source/build candidate", source)
+
+    def test_voice_trigger_ui_explains_rc003_hold_audio_and_has_one_editing_location(self):
+        qml_root = Path(qt_settings_app.__file__).resolve().parent / "qml"
+        connection_source = (qml_root / "ConnectionPage.qml").read_text(
+            encoding="utf-8"
+        )
+        buttons_source = (qml_root / "ButtonsPage.qml").read_text(encoding="utf-8")
+        self.assertIn('text: qsTr("触发方式")', connection_source)
+        self.assertIn("RC003 不支持点按后持续录音", connection_source)
+        self.assertIn("这里的点按或按住仅指电脑端快捷键", connection_source)
+        self.assertIn('objectName: "voiceHotkeySummary_"', buttons_source)
+        self.assertIn("在“连接”页设置", buttons_source)
+        self.assertNotIn('objectName: "voiceHotkeyField_"', buttons_source)
+
+    def test_buttons_page_exposes_mapping_profile_management(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ButtonsPage.qml"
+        ).read_text(encoding="utf-8")
+        for object_name in (
+            "mappingProfileBar",
+            "mappingProfileRow",
+            "mappingProfileCombo",
+            "createMappingProfileButton",
+            "renameMappingProfileButton",
+            "deleteMappingProfileButton",
+            "saveMappingButton",
+        ):
+            self.assertIn(f'objectName: "{object_name}"', source)
+        self.assertIn('text: qsTr("保存当前方案")', source)
+        self.assertIn('text: qsTr("＋ 新建方案")', source)
+        self.assertIn('objectName: "editTextMenuButton"', source)
+        self.assertIn('text: qsTr("快捷文本菜单")', source)
+        self.assertIn('Layout.minimumWidth: implicitWidth', source)
+        self.assertIn('objectName: "textMenuEditorDialog"', source)
+        self.assertIn('objectName: "textMenuItemList"', source)
+        self.assertNotIn('objectName: "inlineTextMenuEditor"', source)
+        self.assertNotIn('text: qsTr("编辑快捷文本…")', source)
+        self.assertIn('text: qsTr("启动桥接")', source)
+        self.assertIn("Layout.minimumWidth: 96", source)
+        self.assertIn('enabled: SettingsController.canEditMappingProfile', source)
+        self.assertNotIn('text: qsTr("恢复默认映射")', source)
 
 
 class DiagnosticsThreadLifecycleAtExitTests(unittest.TestCase):
@@ -349,8 +456,33 @@ class SettingsControllerTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._env_patch = mock.patch.dict(os.environ, {"LOCALAPPDATA": self._tmpdir.name})
         self._env_patch.start()
+        # Controller construction probes the real per-session bridge event.
+        # Keep unit tests isolated from a bridge the developer/user may be
+        # running on this Windows desktop; individual status tests override
+        # this default explicitly.
+        self._bridge_status_patch = mock.patch.object(
+            bridge_launcher, "is_bridge_running", return_value=False
+        )
+        self._bridge_status_patch.start()
+        self._bridge_launch_patch = mock.patch.object(
+            bridge_launcher,
+            "launch_bridge",
+            return_value=bridge_launcher.LaunchResult(
+                bridge_launcher.LaunchOutcome.STARTED,
+                ("fake-bridge", "--bridge"),
+                pid=1234,
+            ),
+        )
+        self._bridge_launch_mock = self._bridge_launch_patch.start()
+        self._autostart_status_patch = mock.patch.object(
+            autostart_windows, "is_enabled", return_value=False
+        )
+        self._autostart_status_patch.start()
 
     def tearDown(self):
+        self._bridge_launch_patch.stop()
+        self._autostart_status_patch.stop()
+        self._bridge_status_patch.stop()
         self._env_patch.stop()
         self._tmpdir.cleanup()
 
@@ -363,27 +495,47 @@ class SettingsControllerTests(unittest.TestCase):
         controller, _ = self._make_controller()
         self.assertEqual(controller.hotkeyText, "ralt+space")
 
-    def test_trigger_mode_options_has_exactly_toggle_and_hold(self):
+    def test_trigger_mode_options_show_three_everyday_modes_with_typeless_first(self):
         controller, _ = self._make_controller()
-        self.assertEqual(len(controller.triggerModeOptions), 2)
+        self.assertEqual(len(controller.triggerModeOptions), 3)
+        self.assertIn("Typeless", controller.triggerModeOptions[0])
+        self.assertIn("点按快捷键", controller.triggerModeOptions[1])
+        self.assertIn("按住快捷键", controller.triggerModeOptions[2])
+        self.assertFalse(any("排障" in option for option in controller.triggerModeOptions))
 
-    def test_trigger_mode_switch_also_switches_the_paired_voice_hotkey(self):
+    def test_trigger_mode_switch_never_overwrites_the_voice_hotkey(self):
         controller, _ = self._make_controller()
-        controller.triggerModeIndex = 1
-        self.assertEqual(controller.hotkeyText, "ralt")
+        controller.hotkeyText = "ctrl+shift+space"
         controller.triggerModeIndex = 0
-        self.assertEqual(controller.hotkeyText, "ralt+space")
+        self.assertEqual(controller.hotkeyText, "ctrl+shift+space")
+        controller.triggerModeIndex = 2
+        self.assertEqual(controller.hotkeyText, "ctrl+shift+space")
 
-    def test_recording_left_ctrl_win_switches_to_hold_without_replacing_capture(self):
+    def test_recording_a_hotkey_does_not_change_the_selected_trigger_mode(self):
         controller, _ = self._make_controller()
+        controller.triggerModeIndex = 0
         controller._on_hotkey_capture_result("lctrl+lwin")
-        self.assertEqual(controller.triggerModeIndex, 1)
+        self.assertEqual(controller.triggerModeIndex, 0)
         controller.hotkeyText = "lctrl+lwin"
         self.assertEqual(controller.hotkeyText, "lctrl+lwin")
 
     def test_launch_status_starts_as_the_not_started_constant(self):
         controller, _ = self._make_controller()
         self.assertEqual(controller.launchStatusText, settings_ui.LAUNCH_NOT_STARTED_TEXT)
+
+    def test_bridge_action_text_reflects_running_state(self):
+        with mock.patch.object(bridge_launcher, "is_bridge_running", return_value=True):
+            controller, _ = self._make_controller()
+        self.assertEqual(controller.bridgeActionText, "保存并重启桥接")
+
+    def test_autostart_toggle_writes_and_reports_the_actual_state(self):
+        controller, _ = self._make_controller()
+        with mock.patch.object(autostart_windows, "set_enabled") as setter:
+            with mock.patch.object(autostart_windows, "is_enabled", return_value=True):
+                controller.setAutostartEnabled(True)
+        setter.assert_called_once_with(True)
+        self.assertTrue(controller.autostartEnabled)
+        self.assertIn("已开启", controller.statusMessage)
 
     def test_mic_row_text_matches_settings_ui_constant(self):
         controller, _ = self._make_controller()
@@ -406,6 +558,50 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertTrue(controller.isRc003Device)
         self.assertFalse(controller.isDjiMic2Device)
         self.assertEqual(controller.mappingPageTitle, "按键映射")
+
+    def test_on_demand_unified_input_defaults_enabled_and_is_user_controllable(self):
+        controller, _ = self._make_controller()
+        self.assertTrue(controller.unifiedOnDemandEnabled)
+        controller.unifiedOnDemandEnabled = False
+        self.assertFalse(controller.unifiedOnDemandEnabled)
+
+    def test_audio_endpoint_list_is_virtual_first_with_an_explicit_show_all_escape_hatch(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Speakers", "Windows WASAPI"),
+            audio_output.AudioEndpoint("CABLE Input", "MME"),
+            audio_output.AudioEndpoint("CABLE Input", "Windows WASAPI"),
+            audio_output.AudioEndpoint("VoiceMeeter Input", "Windows WASAPI"),
+        ]
+        with mock.patch.object(
+            audio_output, "enumerate_output_endpoints", return_value=endpoints
+        ):
+            controller, _ = self._make_controller()
+            self.assertEqual(
+                controller.endpointOptions,
+                [
+                    "CABLE Input — Windows WASAPI",
+                    "VoiceMeeter Input — Windows WASAPI",
+                ],
+            )
+            controller.showAllAudioEndpoints = True
+            self.assertIn("Speakers — Windows WASAPI", controller.endpointOptions)
+            self.assertIn("CABLE Input — MME", controller.endpointOptions)
+
+    def test_selecting_a_custom_endpoint_disables_cable_only_on_demand_detection(self):
+        endpoints = [
+            audio_output.AudioEndpoint("CABLE Input", "Windows WASAPI"),
+            audio_output.AudioEndpoint("VoiceMeeter Input", "Windows WASAPI"),
+        ]
+        with mock.patch.object(
+            audio_output, "enumerate_output_endpoints", return_value=endpoints
+        ):
+            controller, _ = self._make_controller()
+            controller.selectedEndpointIndex = controller.endpointOptions.index(
+                "VoiceMeeter Input — Windows WASAPI"
+            )
+        self.assertFalse(controller.selectedEndpointSupportsOnDemand)
+        self.assertFalse(controller.unifiedOnDemandEnabled)
+        self.assertIn("对应的麦克风端点", controller.endpointBridgeHelpText)
 
     def test_selecting_dji_changes_the_ui_contract_and_persists(self):
         controller, _ = self._make_controller()
@@ -445,6 +641,96 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertEqual(controller.errorMessage, "")
         self.assertIn("已保存", controller.statusMessage)
 
+    def test_save_mappings_starts_a_missing_bridge_and_reports_live_mapping(self):
+        controller, model = self._make_controller()
+        controller.createMappingProfile("工作方案")
+        model.setActionTextAt(model.index_of("power"), "f8")
+        self.assertTrue(controller.saveMappings())
+        self.assertTrue(controller.bridgeRunning)
+        self.assertIn("桥接正在运行", controller.statusMessage)
+
+    def test_manual_bridge_recovery_starts_once_and_enables_all_button_triggers(self):
+        controller, _ = self._make_controller()
+        self.assertFalse(controller.bridgeRunning)
+
+        self.assertTrue(controller.ensureBridgeRunning())
+
+        self._bridge_launch_mock.assert_called_once_with()
+        self.assertTrue(controller.bridgeRunning)
+        self.assertEqual(controller.errorMessage, "")
+        self.assertIn("长按、双击和普通按键现在可以生效", controller.statusMessage)
+
+    def test_mapping_profiles_can_be_created_saved_switched_renamed_and_deleted(self):
+        controller, model = self._make_controller()
+        original_power = model.to_display_map()["power"]
+        self.assertEqual(controller.mappingProfileNames, ["系统默认方案"])
+        self.assertFalse(controller.canDeleteMappingProfile)
+        self.assertFalse(controller.canEditMappingProfile)
+
+        controller.createMappingProfile("Vibe Coding")
+        self.assertEqual(
+            controller.mappingProfileNames, ["系统默认方案", "Vibe Coding"]
+        )
+        self.assertEqual(controller.activeMappingProfileIndex, 1)
+        self.assertTrue(controller.canDeleteMappingProfile)
+        self.assertTrue(controller.canEditMappingProfile)
+
+        model.setActionTextAt(model.index_of("power"), "f9")
+        self.assertTrue(controller.saveMappings())
+        controller.switchMappingProfile(0)
+        self.assertEqual(model.to_display_map()["power"], original_power)
+        self.assertFalse(controller.canEditMappingProfile)
+        controller.switchMappingProfile(1)
+        controller.renameActiveMappingProfile("开发配置")
+        self.assertEqual(
+            controller.mappingProfileNames, ["系统默认方案", "开发配置"]
+        )
+
+        controller.deleteActiveMappingProfile()
+        self.assertEqual(controller.mappingProfileNames, ["系统默认方案"])
+        self.assertEqual(controller.activeMappingProfileIndex, 0)
+        self.assertFalse(controller.canDeleteMappingProfile)
+        self.assertFalse(controller.canEditMappingProfile)
+        self.assertEqual(model.to_display_map()["power"], original_power)
+
+    def test_system_mapping_profile_rejects_direct_save_and_text_menu_edits(self):
+        controller, _ = self._make_controller()
+        original_items = controller.textMenuItems
+
+        self.assertFalse(controller.saveMappings())
+        controller.addTextMenuItem("不应添加", "不应添加", True)
+
+        self.assertEqual(controller.textMenuItems, original_items)
+        self.assertIn("只读", controller.errorMessage)
+
+    def test_text_menu_items_can_be_added_edited_reordered_and_saved(self):
+        controller, _ = self._make_controller()
+        controller.createMappingProfile("快捷文本测试")
+        initial_count = len(controller.textMenuItems)
+        controller.addTextMenuItem("检查", "请检查上述内容", True)
+        self.assertEqual(len(controller.textMenuItems), initial_count + 1)
+
+        last = len(controller.textMenuItems) - 1
+        controller.updateTextMenuItem(last, "检查并修复", "请检查并修复", False)
+        controller.moveTextMenuItem(last, -1)
+        self.assertEqual(controller.textMenuItems[-2]["label"], "检查并修复")
+        self.assertFalse(controller.textMenuItems[-2]["enabled"])
+        self.assertTrue(controller.saveMappings())
+
+        root = Path(self._tmpdir.name) / "RemoteMic" / "RC003"
+        stored = config.load_key_bindings(config.key_bindings_path(root))
+        self.assertIn(
+            {
+                "label": "检查并修复",
+                "text": "请检查并修复",
+                "enabled": False,
+            },
+            stored["text_menu_items"],
+        )
+
+        controller.removeTextMenuItem(len(controller.textMenuItems) - 2)
+        self.assertEqual(len(controller.textMenuItems), initial_count)
+
     def test_save_settings_reports_a_persistence_failure(self):
         controller, _ = self._make_controller()
         with mock.patch.object(
@@ -478,13 +764,30 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertIn("4321", controller.launchStatusText)
         self.assertNotIn("已连接", controller.launchStatusText)
 
-    def test_restore_defaults_resets_hotkey_and_trigger_mode(self):
-        controller, _ = self._make_controller()
-        controller.hotkeyText = "shift+z"
+    def test_save_and_launch_restarts_when_bridge_is_running(self):
+        fake_result = bridge_launcher.LaunchResult(
+            outcome=bridge_launcher.LaunchOutcome.STARTED, command=("exe",), pid=5432
+        )
+        with mock.patch.object(bridge_launcher, "is_bridge_running", return_value=True):
+            controller, _ = self._make_controller()
+            with mock.patch.object(
+                bridge_launcher, "restart_bridge", return_value=fake_result
+            ) as fake_restart, mock.patch.object(bridge_launcher, "launch_bridge") as fake_launch:
+                controller.saveAndLaunch()
+        fake_restart.assert_called_once_with()
+        fake_launch.assert_not_called()
+        self.assertEqual(controller.bridgeActionText, "保存并重启桥接")
+
+    def test_restore_mapping_defaults_preserves_hotkey_and_trigger_mode(self):
+        controller, model = self._make_controller()
+        model.setActionTextAt(model.index_of("power"), "f8")
         controller.triggerModeIndex = 1
-        controller.restoreDefaults()
-        self.assertEqual(controller.hotkeyText, hotkey.DEFAULT_VOICE_HOTKEY.serialize())
-        self.assertEqual(controller.triggerModeIndex, 0)
+        controller.hotkeyText = "shift+z"
+        controller.restoreMappingDefaults()
+        self.assertNotEqual(model.to_display_map()["power"], "f8")
+        self.assertEqual(controller.hotkeyText, "shift+z")
+        self.assertEqual(controller.triggerModeIndex, 1)
+        self.assertIn("尚未保存", controller.statusMessage)
 
     def test_select_button_updates_both_the_controller_and_the_model(self):
         controller, model = self._make_controller()
@@ -509,6 +812,10 @@ class SettingsControllerTests(unittest.TestCase):
                 self.stop_calls += 1
 
         with mock.patch.object(
+            qt_settings_app.button_detection_relay,
+            "ButtonDetectionListener",
+            mock.Mock(return_value=mock.Mock(start=mock.Mock(), stop=mock.Mock())),
+        ), mock.patch.object(
             qt_settings_app.raw_input_windows,
             "enumerate_matching_device_paths",
             return_value=["rc003-device-path"],
@@ -541,9 +848,46 @@ class SettingsControllerTests(unittest.TestCase):
         self.assertIn("电源键", controller.keyDetectionText)
         self.assertIn("0x0066", controller.keyDetectionText)
 
+    def test_real_key_detection_accepts_bridge_relay_when_raw_input_is_unavailable(self):
+        controller, model = self._make_controller()
+        callbacks = []
+
+        class FakeRelayListener:
+            def __init__(self, callback):
+                callbacks.append(callback)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        with mock.patch.object(
+            qt_settings_app.button_detection_relay,
+            "ButtonDetectionListener",
+            FakeRelayListener,
+        ), mock.patch.object(
+            qt_settings_app.raw_input_windows,
+            "enumerate_matching_device_paths",
+            side_effect=RuntimeError("Raw Input unavailable"),
+        ):
+            controller.startKeyDetection()
+
+        self.assertTrue(controller.keyDetectionActive)
+        callbacks[0]("volume_up", True)
+        self.assertFalse(controller.keyDetectionActive)
+        self.assertEqual(controller.selectedButtonId, "volume_up")
+        self.assertEqual(model.selected_button_id(), "volume_up")
+        self.assertIn("音量 + 键", controller.keyDetectionText)
+        self.assertIn("0x0080", controller.keyDetectionText)
+
     def test_real_key_detection_failure_is_reported_in_the_ui(self):
         controller, _ = self._make_controller()
         with mock.patch.object(
+            qt_settings_app.button_detection_relay,
+            "ButtonDetectionListener",
+            side_effect=RuntimeError("relay unavailable"),
+        ), mock.patch.object(
             qt_settings_app.raw_input_windows,
             "enumerate_matching_device_paths",
             side_effect=RuntimeError("Raw Input unavailable"),
@@ -1432,6 +1776,11 @@ def _find_mapping_row_combo(mapping_list, button_id, model):
     return None
 
 
+# This interaction test verifies QML editing/persistence, not process launch.
+# Keep it isolated from the real desktop bridge while profile creation now
+# ensures a missing bridge is started for actual users.
+m.bridge_launcher.is_bridge_running = lambda: True
+
 classes = m._load_qt_classes()
 QGuiApplication = classes["QGuiApplication"]
 QQmlApplicationEngine = classes["QQmlApplicationEngine"]
@@ -1465,6 +1814,8 @@ window = engine.rootObjects()[0]
 # reliably settles it (confirmed empirically while writing this test - a
 # mapping row's ComboBox does not exist at all, and its ListView reports
 # height 0, without this).
+controller.createMappingProfile("直接保存测试")
+window.setProperty("width", 780)
 window.show()
 for _ in range(10):
     window.grabWindow()
@@ -1478,6 +1829,46 @@ tab_bar.setProperty("currentIndex", 1)
 for _ in range(10):
     window.grabWindow()
     app.processEvents()
+
+# The profile controls must remain a single compact row at the application's
+# minimum supported width. In particular, "保存当前方案" must not be clipped
+# at the right edge and none of the controls may wrap onto another line.
+profile_bar = _find_child_by_object_name(window, "mappingProfileBar")
+profile_controls = [
+    _find_child_by_object_name(window, name)
+    for name in (
+        "mappingProfileCombo",
+        "createMappingProfileButton",
+        "renameMappingProfileButton",
+        "deleteMappingProfileButton",
+        "saveMappingButton",
+    )
+]
+assert profile_bar is not None
+assert all(control is not None for control in profile_controls)
+bar_left = profile_bar.mapToScene(QPointF(0, 0)).x()
+bar_right = bar_left + profile_bar.property("width")
+control_tops = []
+previous_right = bar_left
+for control in profile_controls:
+    top_left = control.mapToScene(QPointF(0, 0))
+    control_right = top_left.x() + control.property("width")
+    assert top_left.x() >= previous_right - 1, "profile controls overlap or reorder"
+    assert control_right <= bar_right + 1, (
+        "profile toolbar is clipped on the right: "
+        + control.objectName()
+        + f" right={control_right} barRight={bar_right} width={control.property('width')}"
+    )
+    control_tops.append(round(top_left.y()))
+    previous_right = control_right
+assert max(control_tops) - min(control_tops) <= 1, "profile controls wrapped"
+
+edit_text_button = _find_child_by_object_name(window, "editTextMenuButton")
+assert edit_text_button is not None and edit_text_button.property("visible")
+assert edit_text_button.property("text") == "快捷文本菜单"
+assert edit_text_button.property("width") + 1 >= edit_text_button.property("implicitWidth"), (
+    "shortcut text menu button label is clipped"
+)
 
 mapping_list = _find_child_by_object_name(window, "mappingList")
 assert mapping_list is not None
@@ -1644,6 +2035,10 @@ if len(engine.rootObjects()) != 1:
     sys.exit(1)
 
 window = engine.rootObjects()[0]
+# The connection page is intentionally scrollable and gains an opt-in audio
+# section. Contrast sampling must render the controls themselves rather than
+# accidentally sample the blank viewport where an off-screen control maps.
+window.setProperty("height", 1500)
 window.show()
 for _ in range(10):
     window.grabWindow()

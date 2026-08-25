@@ -1,8 +1,8 @@
 """Narrowly-scoped x64 DLL injector for the RC003 WUDF host.
 
-This is adapted from remote-bridge-hub's Xiaomi injector.  Injection is only
-attempted from a process the user has explicitly started with administrator
-rights.  The normal Remote Mic process never elevates itself.
+This is adapted from remote-bridge-hub's Xiaomi injector. The normal Remote
+Mic process stays at user integrity and launches one short-lived, explicitly
+UAC-approved copy of its hidden injector entry point.
 """
 
 from __future__ import annotations
@@ -12,7 +12,11 @@ import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+import subprocess
+import sys
+from typing import Callable
 
+from . import logging_setup
 from .frida_hid_tap_runtime import (
     GADGET_DLL_SHA256,
     find_rc003_hidogatt_host_pid,
@@ -35,6 +39,11 @@ TOKEN_ADJUST_PRIVILEGES = 0x0020
 TOKEN_QUERY = 0x0008
 SE_PRIVILEGE_ENABLED = 0x00000002
 ERROR_NOT_ALL_ASSIGNED = 1300
+ERROR_CANCELLED = 1223
+SEE_MASK_NOCLOSEPROCESS = 0x00000040
+SEE_MASK_NOASYNC = 0x00000100
+SW_HIDE = 0
+WAIT_TIMEOUT = 258
 
 
 class LUID(ctypes.Structure):
@@ -50,6 +59,114 @@ class TOKEN_PRIVILEGES(ctypes.Structure):
         ("PrivilegeCount", wintypes.DWORD),
         ("Privileges", LUID_AND_ATTRIBUTES * 1),
     )
+
+
+class SHELLEXECUTEINFOW(ctypes.Structure):
+    _fields_ = (
+        ("cbSize", wintypes.DWORD),
+        ("fMask", wintypes.ULONG),
+        ("hwnd", wintypes.HWND),
+        ("lpVerb", wintypes.LPCWSTR),
+        ("lpFile", wintypes.LPCWSTR),
+        ("lpParameters", wintypes.LPCWSTR),
+        ("lpDirectory", wintypes.LPCWSTR),
+        ("nShow", ctypes.c_int),
+        ("hInstApp", wintypes.HINSTANCE),
+        ("lpIDList", wintypes.LPVOID),
+        ("lpClass", wintypes.LPCWSTR),
+        ("hkeyClass", wintypes.HKEY),
+        ("dwHotKey", wintypes.DWORD),
+        ("hIconOrMonitor", wintypes.HANDLE),
+        ("hProcess", wintypes.HANDLE),
+    )
+
+
+def injector_command(pid: int) -> tuple[str, str, str]:
+    """Build the same hidden injector entry point for source and frozen runs."""
+
+    if pid <= 0:
+        raise ValueError("injector PID must be positive")
+    executable = str(Path(sys.executable).resolve())
+    if getattr(sys, "frozen", False):
+        arguments = ["--rc003-hid-injector", "--pid", str(pid)]
+    else:
+        arguments = [
+            "-m",
+            "ovb_rc003",
+            "--rc003-hid-injector",
+            "--pid",
+            str(pid),
+        ]
+    return executable, subprocess.list2cmdline(arguments), str(Path(executable).parent)
+
+
+def _run_elevated_command(
+    executable: str,
+    parameters: str,
+    directory: str,
+    timeout_ms: int,
+) -> int:
+    """Launch one UAC helper and return its real process exit code."""
+
+    if os.name != "nt":
+        raise PermissionError("RC003 injector elevation requires Windows")
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = (ctypes.POINTER(SHELLEXECUTEINFOW),)
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "runas"
+    info.lpFile = executable
+    info.lpParameters = parameters
+    info.lpDirectory = directory
+    info.nShow = SW_HIDE
+    ctypes.set_last_error(0)
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        error = ctypes.get_last_error()
+        if error == ERROR_CANCELLED:
+            raise PermissionError("RC003 HID tap UAC request was declined")
+        raise ctypes.WinError(error)
+    if not info.hProcess:
+        raise RuntimeError("elevated RC003 injector returned no process handle")
+    try:
+        wait_result = kernel32.WaitForSingleObject(info.hProcess, timeout_ms)
+        if wait_result == WAIT_TIMEOUT:
+            raise TimeoutError("elevated RC003 injector timed out")
+        if wait_result != WAIT_OBJECT_0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(exit_code.value)
+    finally:
+        kernel32.CloseHandle(info.hProcess)
+
+
+def launch_elevated_injector(
+    pid: int,
+    *,
+    timeout_ms: int = 30_000,
+    _run_elevated: Callable[[str, str, str, int], int] = _run_elevated_command,
+) -> bool:
+    """Request one explicit UAC helper and verify that injection completed."""
+
+    executable, parameters, directory = injector_command(pid)
+    exit_code = _run_elevated(executable, parameters, directory, timeout_ms)
+    if exit_code != 0:
+        raise RuntimeError(f"elevated RC003 injector failed with exit code {exit_code}")
+    return True
 
 
 def enable_debug_privilege() -> None:
@@ -250,11 +367,11 @@ def _target_process_name(pid: int) -> str:
 
 
 def inject_current_process(pid: int) -> None:
-    """Inject only when this process already has the required rights.
+    """Inject from the already-elevated hidden helper process only.
 
-    The application deliberately does not request elevation.  Callers that
-    want the optional tap must launch the bridge explicitly from an elevated
-    terminal or executable.
+    This function never performs its own elevation. The normal bridge calls
+    :func:`launch_elevated_injector`, whose child revalidates the target and
+    pinned DLL here before opening or writing the WUDFHost process.
     """
 
     if os.name != "nt":
@@ -264,13 +381,17 @@ def inject_current_process(pid: int) -> None:
         raise RuntimeError(
             f"RC003 host changed before injection: expected={expected_pid} requested={pid}"
         )
+    # WUDFHost runs in Session 0 under a protected service identity. Even an
+    # elevated administrator token cannot query its image until the helper
+    # enables SeDebugPrivilege. Keep the registry-derived PID equality check
+    # above this boundary, then verify the process name immediately after it.
+    enable_debug_privilege()
     if _target_process_name(pid) != "wudfhost.exe":
         raise RuntimeError("refusing non-WUDFHost target")
     dll_path = prepare_secure_runtime()
     dll_hash = sha256_file(dll_path)
     if dll_hash != GADGET_DLL_SHA256:
         raise RuntimeError(f"verified Gadget changed before injection: {dll_hash}")
-    enable_debug_privilege()
     inject_library(pid, dll_path)
 
 
@@ -278,7 +399,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--pid", type=int, required=True)
     args = parser.parse_args(argv)
-    inject_current_process(args.pid)
+    try:
+        inject_current_process(args.pid)
+    except Exception:
+        # The packaged helper uses PyInstaller's windowed bootloader. Letting
+        # an exception escape displays an intrusive "Unhandled exception in
+        # script" dialog even though the parent bridge already waits for this
+        # exit code. Record the real traceback in app.log and fail normally.
+        logging_setup.get_logger().exception("RC003 HID tap elevated helper failed")
+        return 1
     return 0
 
 

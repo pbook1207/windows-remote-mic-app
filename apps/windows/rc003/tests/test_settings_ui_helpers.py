@@ -13,11 +13,16 @@ from ovb_rc003.settings_ui import (
     LAUNCH_NOT_STARTED_TEXT,
     SettingsValidationError,
     _VOICE_DISPLAY,
+    _PRESET_KEY_COMBOS,
+    _TEXT_SUBMIT_PREFIX,
+    _TEXT_SUBMIT_PRESET,
     _action_to_display,
     _display_to_action,
     _endpoint_display,
     _parse_endpoint_display,
+    bridge_endpoint_help,
     build_save_model,
+    compact_bridge_endpoint_options,
     default_display_state,
     describe_launch_result,
     describe_log_open_result,
@@ -39,6 +44,46 @@ class DisplayRoundTripTests(unittest.TestCase):
         restored = _display_to_action(display)
         self.assertEqual(restored.kind, key_mapping.ActionKind.KEY_COMBO)
         self.assertEqual(restored.keys, ("ctrl", "shift", "p"))
+
+    def test_compact_bridge_endpoints_keep_virtual_devices_and_prefer_wasapi(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Speakers", "Windows WASAPI"),
+            audio_output.AudioEndpoint("CABLE Input", "MME"),
+            audio_output.AudioEndpoint("CABLE Input", "Windows WASAPI"),
+            audio_output.AudioEndpoint("VoiceMeeter Input", "MME"),
+            audio_output.AudioEndpoint("VoiceMeeter Input", "Windows WASAPI"),
+        ]
+        self.assertEqual(
+            compact_bridge_endpoint_options(endpoints),
+            [
+                "CABLE Input — Windows WASAPI",
+                "VoiceMeeter Input — Windows WASAPI",
+            ],
+        )
+
+    def test_compact_bridge_endpoints_always_keep_the_current_custom_device(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Speakers", "Windows WASAPI"),
+            audio_output.AudioEndpoint("CABLE Input", "Windows WASAPI"),
+        ]
+        self.assertEqual(
+            compact_bridge_endpoint_options(
+                endpoints, current_display="Speakers — Windows WASAPI"
+            ),
+            [
+                "Speakers — Windows WASAPI",
+                "CABLE Input — Windows WASAPI",
+            ],
+        )
+
+    def test_bridge_endpoint_help_is_specific_for_vb_cable_and_generic_otherwise(self):
+        self.assertIn(
+            "CABLE Output",
+            bridge_endpoint_help("CABLE Input — Windows WASAPI"),
+        )
+        custom_help = bridge_endpoint_help("VoiceMeeter Input — Windows WASAPI")
+        self.assertIn("对应的麦克风端点", custom_help)
+        self.assertIn("暂不支持空闲麦克风检测", custom_help)
 
     def test_reference_action_labels_round_trip_to_windows_chords(self):
         expected = {
@@ -77,6 +122,53 @@ class DisplayRoundTripTests(unittest.TestCase):
             restored = _display_to_action(label)
             self.assertEqual(restored.kind, action_kind, label)
             self.assertEqual(_action_to_display(restored), label)
+
+    def test_vibe_coding_action_labels_round_trip_to_semantic_actions(self):
+        expected = {
+            "鼠标所在区域向上滚动": key_mapping.ActionKind.SCROLL_UP,
+            "鼠标所在区域向下滚动": key_mapping.ActionKind.SCROLL_DOWN,
+            "切换到左侧虚拟桌面": key_mapping.ActionKind.VIRTUAL_DESKTOP_LEFT,
+            "切换到右侧虚拟桌面": key_mapping.ActionKind.VIRTUAL_DESKTOP_RIGHT,
+            "打开任务视图": key_mapping.ActionKind.TASK_VIEW,
+            "打开剪贴板历史": key_mapping.ActionKind.CLIPBOARD_HISTORY,
+            "上一个标签页": key_mapping.ActionKind.PREVIOUS_TAB,
+            "下一个标签页": key_mapping.ActionKind.NEXT_TAB,
+            "窗口贴靠左侧": key_mapping.ActionKind.SNAP_WINDOW_LEFT,
+            "窗口最大化": key_mapping.ActionKind.MAXIMIZE_WINDOW,
+        }
+        for label, action_kind in expected.items():
+            with self.subTest(label=label):
+                restored = _display_to_action(label)
+                self.assertEqual(restored.kind, action_kind)
+                self.assertEqual(_action_to_display(restored), label)
+
+    def test_action_category_heading_is_not_a_selectable_mapping(self):
+        with self.assertRaisesRegex(hotkey.HotkeyParseError, "具体动作"):
+            _display_to_action("── Windows 工作区 ──")
+
+    def test_custom_text_submit_label_round_trips(self):
+        label = _TEXT_SUBMIT_PREFIX + "继续处理 ✅"
+        restored = _display_to_action(label)
+
+        self.assertEqual(
+            restored.kind, key_mapping.ActionKind.TYPE_TEXT
+        )
+        self.assertEqual(restored.keys, ())
+        self.assertEqual(restored.text, "继续处理 ✅")
+        self.assertEqual(_action_to_display(restored), label)
+        self.assertIn(_TEXT_SUBMIT_PRESET, _PRESET_KEY_COMBOS)
+
+    def test_fixed_execute_display_migrates_to_custom_text_action(self):
+        restored = _display_to_action("输入“执行”并回车")
+
+        self.assertEqual(
+            restored.kind, key_mapping.ActionKind.TYPE_TEXT
+        )
+        self.assertEqual(restored.text, "执行")
+
+    def test_empty_custom_text_is_rejected(self):
+        with self.assertRaises(hotkey.HotkeyParseError):
+            _display_to_action(_TEXT_SUBMIT_PREFIX)
 
     def test_modifier_only_combo_round_trips_through_button_mapping(self):
         restored = _display_to_action("ctrl+shift")
@@ -124,6 +216,16 @@ class VoiceTriggerPresetTests(unittest.TestCase):
         )
         self.assertEqual(
             voice_hotkey_for_trigger_mode(key_mapping.VoiceTriggerMode.HOLD),
+            "ralt",
+        )
+        self.assertEqual(
+            voice_hotkey_for_trigger_mode(key_mapping.VoiceTriggerMode.TYPELESS),
+            "ralt",
+        )
+        self.assertEqual(
+            voice_hotkey_for_trigger_mode(
+                key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY
+            ),
             "ralt",
         )
 
@@ -264,6 +366,54 @@ class BuildSaveModelTests(unittest.TestCase):
         self.assertEqual(new_config["output_endpoint_host_api"], "Windows WASAPI")
         self.assertEqual(new_config["voice_trigger_mode"], "hold")
 
+    def test_unified_input_persists_opt_in_and_selected_system_microphone(self):
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="win+h",
+            trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+            endpoint_display_text="CABLE Input — Windows WASAPI",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            unified_virtual_input_enabled=True,
+            unified_on_demand_enabled=True,
+            system_input_endpoint_display_text="Built-in Mic — Windows WASAPI",
+        )
+        self.assertTrue(new_config["unified_virtual_input_enabled"])
+        self.assertTrue(new_config["unified_on_demand_enabled"])
+        self.assertEqual(new_config["system_input_endpoint_name"], "Built-in Mic")
+        self.assertEqual(
+            new_config["system_input_endpoint_host_api"], "Windows WASAPI"
+        )
+
+    def test_unified_input_allows_a_custom_bridge_and_disables_cable_only_idle_detection(self):
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="win+h",
+            trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+            endpoint_display_text="VoiceMeeter Input — Windows WASAPI",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            unified_virtual_input_enabled=True,
+            unified_on_demand_enabled=True,
+            system_input_endpoint_display_text="Built-in Mic — Windows WASAPI",
+        )
+        self.assertEqual(new_config["output_endpoint_name"], "VoiceMeeter Input")
+        self.assertTrue(new_config["unified_virtual_input_enabled"])
+        self.assertFalse(new_config["unified_on_demand_enabled"])
+
+    def test_unified_input_rejects_cable_output_as_system_microphone(self):
+        with self.assertRaises(SettingsValidationError):
+            build_save_model(
+                button_display_map={},
+                hotkey_text="win+h",
+                trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+                endpoint_display_text="CABLE Input — Windows WASAPI",
+                base_config=self.base_config,
+                base_bindings=self.base_bindings,
+                unified_virtual_input_enabled=True,
+                system_input_endpoint_display_text="CABLE Output — Windows WASAPI",
+            )
+
     def test_does_not_mutate_base_dicts(self):
         base_config_copy = dict(self.base_config)
         base_bindings_copy = {"schema_version": 1, "bindings": dict(self.base_bindings["bindings"])}
@@ -327,6 +477,38 @@ class BuildSaveModelTests(unittest.TestCase):
             "system_volume_up",
         )
 
+    def test_custom_text_is_saved_independently_for_primary_and_secondary(self):
+        _, new_bindings = build_save_model(
+            button_display_map={"power": _TEXT_SUBMIT_PREFIX + "继续"},
+            secondary_display_map={
+                "power": {
+                    "double_click": _TEXT_SUBMIT_PREFIX + "请总结上述内容 ✅",
+                    "long_press": "未设置",
+                }
+            },
+            hotkey_text="win+h",
+            trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+        )
+
+        self.assertEqual(
+            new_bindings["bindings"]["power"],
+            {
+                "kind": "type_text",
+                "keys": [],
+                "text": "继续",
+            },
+        )
+        self.assertEqual(
+            new_bindings["secondary_bindings"]["power"]["double_click"],
+            {
+                "kind": "type_text",
+                "keys": [],
+                "text": "请总结上述内容 ✅",
+            },
+        )
     def test_blank_secondary_action_is_not_persisted(self):
         _, new_bindings = build_save_model(
             button_display_map={"power": "escape"},
@@ -364,9 +546,9 @@ class DefaultDisplayStateTests(unittest.TestCase):
         state = default_display_state()
         self.assertEqual(state.hotkey_text, hotkey.DEFAULT_VOICE_HOTKEY.serialize())
 
-    def test_trigger_mode_defaults_to_toggle_label(self):
+    def test_trigger_mode_defaults_to_point_tap_label(self):
         state = default_display_state()
-        self.assertIn("免按住", state.trigger_mode_label)
+        self.assertIn("点按快捷键", state.trigger_mode_label)
 
 
 class DescribeLaunchResultTests(unittest.TestCase):

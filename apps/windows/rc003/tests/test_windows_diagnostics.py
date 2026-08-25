@@ -323,19 +323,14 @@ class OutputEndpointResolutionCheckTests(unittest.TestCase):
         self.assertEqual(result.status, diag.CheckStatus.PASS)
         self.assertIn("CABLE Input", result.detail)
 
-    def test_resolves_to_non_cable_endpoint_fails_with_actionable_text(self):
-        # RETRY 1 (independent review): this used to assert PASS here - a
-        # false green readiness signal for the bundled VB-CABLE workflow
-        # (taskbook line 77 requires the saved endpoint to point to CABLE
-        # Input for that workflow). A real, present, non-CABLE endpoint is
-        # a legitimate FAIL for this check, not a quieter kind of success.
+    def test_resolves_to_custom_endpoint_passes_with_pairing_reminder(self):
         result = diag.check_output_endpoint_resolution(
             "Speakers", "",
             list_playback=lambda: [audio_output.AudioEndpoint(name="Speakers")],
         )
-        self.assertEqual(result.status, diag.CheckStatus.FAIL)
-        self.assertIn("不是 CABLE Input", result.detail)
-        self.assertIn("选择检测到的", result.detail)
+        self.assertEqual(result.status, diag.CheckStatus.PASS)
+        self.assertIn("自定义桥接端点", result.detail)
+        self.assertIn("对应的麦克风端点", result.detail)
 
     def test_empty_selection_fails(self):
         result = diag.check_output_endpoint_resolution(

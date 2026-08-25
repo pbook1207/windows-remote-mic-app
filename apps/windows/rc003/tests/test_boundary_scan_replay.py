@@ -79,7 +79,10 @@ _BRANDING_CHECK_EXEMPT_RELATIVE_PATHS = {
     Path("tests/test_boundary_scan_replay.py"),
     Path("build/check-public-boundary.ps1"),
     Path("installer/readme-rc003.txt"),
+    Path("installer/RemoteMicRC003Setup.iss"),
     Path("src/ovb_rc003/vb_cable_bundle.py"),
+    Path("src/ovb_rc003/frida_hid_tap_injector.py"),
+    Path("src/ovb_rc003/autostart_windows.py"),
     # XRBM-031: README.md/ATTRIBUTION.md document the same disclosed
     # "runas"/UAC vendor-launch mechanism in prose (see README.md's
     # "VB-CABLE driver helper" section and ATTRIBUTION.md's
@@ -206,6 +209,36 @@ class BoundaryScanReplayTests(unittest.TestCase):
         path = _RC003_ROOT / "src" / "ovb_rc003" / "vb_cable_bundle.py"
         text = path.read_text(encoding="utf-8")
         self.assertTrue(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
+        self.assertFalse(any(marker in text for marker in _AUTOSTART_MARKERS))
+
+    def test_autostart_module_is_exempt_only_for_the_user_controlled_run_value(self):
+        path = _RC003_ROOT / "src" / "ovb_rc003" / "autostart_windows.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("CurrentVersion\\Run", text)
+        self.assertIn("bridge_launcher.build_launch_command", text)
+        self.assertFalse(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
+
+    def test_installer_autostart_reference_only_cleans_up_on_uninstall(self):
+        path = _RC003_ROOT / "installer" / "RemoteMicRC003Setup.iss"
+        text = path.read_text(encoding="utf-8")
+        run_key_lines = [
+            line for line in text.splitlines() if "CurrentVersion\\Run" in line
+        ]
+        self.assertEqual(len(run_key_lines), 1)
+        line = run_key_lines[0]
+        self.assertIn("ValueType: none", line)
+        self.assertIn("uninsdeletevalue", line)
+        self.assertNotIn("ValueData:", line)
+
+    def test_frida_injector_is_exempt_only_for_verified_uac_helper(self):
+        path = _RC003_ROOT / "src" / "ovb_rc003" / "frida_hid_tap_injector.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertIn("--rc003-hid-injector", text)
+        self.assertIn("find_rc003_hidogatt_host_pid", text)
+        self.assertIn("GADGET_DLL_SHA256", text)
         self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
         self.assertFalse(any(marker in text for marker in _AUTOSTART_MARKERS))
 

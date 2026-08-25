@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import queue
 import sys
 import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Callable, FrozenSet, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 
 WH_KEYBOARD_LL = 13
@@ -81,6 +82,14 @@ class _ArmedKeyEvent:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class _HeldKeyEvent:
+    """One physical RC003 key whose direct-HID down is still active."""
+
+    release_pending: bool
+    expires_at: float
+
+
 def build_physical_key_event(
     target: PhysicalKeyTarget, is_pressed: bool, event_time: int
 ) -> Tuple[KBDLLHOOKSTRUCT, int]:
@@ -137,6 +146,7 @@ class LegacyKeySuppressor:
         # use the same conservative window for the RC003 key set.
         self._consume_wait_seconds = max(0.0, float(consume_wait_seconds))
         self._armed_events: List[_ArmedKeyEvent] = []
+        self._held_key_events: Dict[Tuple[int, int, bool], _HeldKeyEvent] = {}
         self._armed_events_lock = threading.Lock()
         # Raw Input and the low-level hook run on different threads, so
         # ``arm_key_event`` (Raw Input thread) and ``consume_armed_key_event``
@@ -151,6 +161,14 @@ class LegacyKeySuppressor:
         self._thread_id = wintypes.DWORD(0)
         self._hook = None
         self._hookproc_keepalive = None
+        # Microsoft requires WH_KEYBOARD_LL callbacks to hand work to a
+        # worker and return immediately.  Calling the app synchronously from
+        # the hook can wait on its voice lock while SendInput is itself
+        # waiting for hook delivery; Windows then passes the timed-out F5 to
+        # the foreground application (Notepad inserts date/time for F5).
+        self._event_queue: queue.SimpleQueue[object] = queue.SimpleQueue()
+        self._event_stop_sentinel = object()
+        self._event_worker: Optional[threading.Thread] = None
 
     @property
     def is_running(self) -> bool:
@@ -196,6 +214,51 @@ class LegacyKeySuppressor:
                 # callback is temporarily unavailable.
                 pass
         return True
+
+    def _enqueue_key_event(self, vk_code: int, is_pressed: bool) -> None:
+        """Queue an already-swallowed edge without blocking the hook."""
+
+        if self._on_key_event is not None:
+            self._event_queue.put((int(vk_code), bool(is_pressed)))
+
+    def _run_event_worker(self) -> None:
+        while True:
+            item = self._event_queue.get()
+            if item is self._event_stop_sentinel:
+                return
+            vk_code, is_pressed = item
+            callback = self._on_key_event
+            if callback is None:
+                continue
+            try:
+                callback(vk_code, is_pressed)
+            except Exception:
+                # The original physical key is already swallowed.  A failed
+                # app callback must not kill the worker or leak a later F5.
+                pass
+
+    def _start_event_worker(self) -> None:
+        if self._on_key_event is None:
+            return
+        self._event_queue = queue.SimpleQueue()
+        self._event_worker = threading.Thread(
+            target=self._run_event_worker,
+            name="rc003-legacy-key-events",
+            daemon=True,
+        )
+        self._event_worker.start()
+
+    def _stop_event_worker(self) -> None:
+        worker = self._event_worker
+        if worker is None:
+            return
+        self._event_queue.put(self._event_stop_sentinel)
+        worker.join(timeout=2.0)
+        if worker.is_alive():
+            raise LegacyKeySuppressorUnavailableError(
+                "legacy key callback worker did not stop within 2.0s"
+            )
+        self._event_worker = None
 
     def arm_key_event(
         self,
@@ -246,6 +309,107 @@ class LegacyKeySuppressor:
             threading.current_thread().name,
         )
 
+    def track_direct_key_hold(
+        self,
+        vk_code: int,
+        scan_code: int,
+        extended: bool,
+        is_pressed: bool,
+        *,
+        hold_lifetime_seconds: float = 30.0,
+        release_grace_seconds: float = 1.0,
+    ) -> None:
+        """Track a device-scoped direct-HID hold until its legacy key-up.
+
+        A single keyboard down edge can be followed by many low-level-hook
+        down records while Windows auto-repeat is active. The direct HID tap
+        provides a stable device-scoped down/up state, so retain that exact
+        physical identity and swallow every matching non-injected legacy
+        record for the duration of the hold. On a tap-side release, retain a
+        short grace period so repeats queued ahead of the physical key-up do
+        not escape into the foreground application.
+
+        The timeout is deliberately fail-open: a lost HID release must never
+        leave an ordinary keyboard key blocked indefinitely.
+        """
+
+        if int(vk_code) == 0x74:
+            return
+        identity = (int(vk_code), int(scan_code), bool(extended))
+        now = time.monotonic()
+        with self._armed_events_lock:
+            self._purge_expired_held_key_events_locked(now)
+            if is_pressed:
+                self._held_key_events[identity] = _HeldKeyEvent(
+                    release_pending=False,
+                    expires_at=now + max(0.0, float(hold_lifetime_seconds)),
+                )
+            else:
+                held = self._held_key_events.get(identity)
+                if held is not None:
+                    self._held_key_events[identity] = _HeldKeyEvent(
+                        release_pending=True,
+                        expires_at=now + max(0.0, float(release_grace_seconds)),
+                    )
+            self._armed_events_changed.notify_all()
+        _logger.info(
+            "track direct key hold: vk=0x%X scan=0x%X ext=%s pressed=%s active=%s",
+            identity[0],
+            identity[1],
+            identity[2],
+            bool(is_pressed),
+            identity in self._held_key_events,
+        )
+
+    def consume_direct_key_hold_event(
+        self,
+        vk_code: int,
+        scan_code: int,
+        extended: bool,
+        is_pressed: bool,
+    ) -> bool:
+        """Consume an initial/repeated edge belonging to a direct-HID hold."""
+
+        identity = (int(vk_code), int(scan_code), bool(extended))
+        with self._armed_events_lock:
+            now = time.monotonic()
+            self._purge_expired_held_key_events_locked(now)
+            held = self._held_key_events.get(identity)
+            if held is None:
+                return False
+            if not is_pressed:
+                self._held_key_events.pop(identity, None)
+            # When the direct tap won the race, an armed token for the same
+            # edge may still be present. Remove it so a later real keyboard
+            # event cannot consume that stale token.
+            self._armed_events = [
+                event
+                for event in self._armed_events
+                if not (
+                    event.vk_code == identity[0]
+                    and event.scan_code == identity[1]
+                    and event.extended == identity[2]
+                    and event.is_pressed == bool(is_pressed)
+                )
+            ]
+        _logger.info(
+            "consume direct key hold: vk=0x%X scan=0x%X ext=%s pressed=%s "
+            "release_pending=%s",
+            identity[0],
+            identity[1],
+            identity[2],
+            bool(is_pressed),
+            held.release_pending,
+        )
+        return True
+
+    def _purge_expired_held_key_events_locked(self, now: float) -> None:
+        self._held_key_events = {
+            identity: event
+            for identity, event in self._held_key_events.items()
+            if event.expires_at > now
+        }
+
     def consume_armed_key_event(
         self,
         vk_code: int,
@@ -267,6 +431,13 @@ class LegacyKeySuppressor:
         through with no latency.
         """
 
+        if int(vk_code) in self._suppress_vk_codes:
+            # Dedicated legacy keys (currently RC003's F5 voice leak) are
+            # always swallowed by handle_key_event() and are never armed by
+            # Raw Input/HID. Waiting for an arm that cannot exist adds one
+            # 62-78 ms stall for every auto-repeat while the mic is held and
+            # backs up the global low-level keyboard hook.
+            return False
         if self._rc003_vk_codes is not None and int(vk_code) not in self._rc003_vk_codes:
             return False
         effective_wait = (
@@ -387,24 +558,29 @@ class LegacyKeySuppressor:
         self._ready_event.clear()
         self._stop_event.clear()
         self._start_error = None
+        self._start_event_worker()
         self._thread = threading.Thread(target=_run_target or self._run, daemon=True)
         self._thread.start()
         if not self._ready_event.wait(timeout=start_timeout):
             self._stop_event.set()
             self._thread.join(timeout=2.0)
+            self._stop_event_worker()
             raise LegacyKeySuppressorUnavailableError(
                 f"legacy key suppressor did not become ready within {start_timeout}s"
             )
         if self._start_error is not None:
             error = self._start_error
             self._thread = None
+            self._stop_event_worker()
             raise error
 
     def stop(self) -> None:
         self._stop_event.set()
         with self._armed_events_lock:
             self._armed_events.clear()
+            self._held_key_events.clear()
         if self._thread is None:
+            self._stop_event_worker()
             return
         if sys.platform == "win32" and self._thread_id.value:
             user32 = ctypes.windll.user32  # type: ignore[attr-defined]
@@ -423,6 +599,7 @@ class LegacyKeySuppressor:
             )
         self._thread = None
         self._thread_id = wintypes.DWORD(0)
+        self._stop_event_worker()
 
     def _run(self) -> None:
         try:
@@ -545,12 +722,18 @@ class LegacyKeySuppressor:
                                 )
                             except Exception:
                                 pass
-                        if self._on_key_event is not None:
-                            try:
-                                self._on_key_event(int(event.vkCode), is_pressed)
-                            except Exception:
-                                pass
+                        self._enqueue_key_event(int(event.vkCode), is_pressed)
                         return 1
+            if (
+                not (int(event.flags) & LLKHF_INJECTED)
+                and self.consume_direct_key_hold_event(
+                    int(event.vkCode),
+                    int(event.scanCode),
+                    bool(int(event.flags) & LLKHF_EXTENDED),
+                    is_pressed,
+                )
+            ):
+                return 1
             if (
                 not (int(event.flags) & LLKHF_INJECTED)
                 and self.consume_armed_key_event(
@@ -561,6 +744,7 @@ class LegacyKeySuppressor:
                 )
             ):
                 return 1
-            if self.handle_key_event(event.vkCode, event.flags, is_pressed):
+            if self.should_suppress(event.vkCode, event.flags):
+                self._enqueue_key_event(int(event.vkCode), is_pressed)
                 return 1
         return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)

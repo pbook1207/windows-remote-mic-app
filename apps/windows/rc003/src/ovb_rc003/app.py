@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import List, Optional
 
 from . import (
@@ -64,6 +65,7 @@ from . import (
     audio_playback,
     action_executor,
     ble_transport_winrt,
+    button_detection_relay,
     button_gesture,
     config,
     connection_supervisor,
@@ -76,11 +78,38 @@ from . import (
     legacy_key_suppressor_windows,
     logging_setup,
     raw_input_windows,
+    text_menu_overlay,
+    unified_audio_router,
     voice_controller,
     win32_input,
     win32_keys,
 )
 from .atvv_session import AudioStarted, AudioStopped, CapsReceived, MicButtonPressed, PcmStats
+
+
+# Typeless ignores a second Right-Alt toggle delivered almost immediately
+# after the first while its dictation UI is still opening.  Delay only the
+# closing edge on a daemon timer: sleeping on the ATVV callback thread stalls
+# audio/control events and can process AUDIO_STOP while the physical button is
+# still held.
+_TYPELESS_MIN_TAP_INTERVAL_SECONDS = 0.75
+# Direct HID and ATVV can both briefly report an UP/STOP followed by a new
+# DOWN/START while the user's finger has not left the RC003 mic button.  Do
+# not close/re-arm Typeless until release has stayed quiet for this long.
+_TYPELESS_STABLE_RELEASE_SECONDS = 0.50
+_UNIFIED_INPUT_RELEASE_DEBOUNCE_SECONDS = 0.12
+_MIC_HID_USAGES = frozenset(
+    usage
+    for usage, button in frida_compat.TAP_USAGE_TO_BUTTON.items()
+    if button == "mic"
+)
+_TYPELESS_PHYSICAL_MODES = frozenset(
+    {
+        key_mapping.VoiceTriggerMode.TYPELESS,
+        key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY,
+    }
+)
+_TEXT_MENU_NAV_BUTTONS = frozenset({"up", "down", "ok", "back"})
 
 
 class CleanupIncompleteError(RuntimeError):
@@ -106,6 +135,10 @@ class RC003App:
             self._bindings_path
         )
         self._bindings_mtime_ns = self._bindings_file_mtime_ns()
+        self._text_menu = text_menu_overlay.TextMenuOverlay(
+            on_select=self._input_text_menu_selection
+        )
+        self._text_menu_consumed_buttons: set[str] = set()
         self._button_gestures = button_gesture.ButtonGestureDispatcher(
             is_action_configured=self._is_button_action_configured,
             is_repeatable=self._is_button_repeatable,
@@ -116,6 +149,9 @@ class RC003App:
             key_mapping.VoiceTriggerMode(self._config["voice_trigger_mode"])
         )
         self._voice_hotkey = hotkey.HotkeySpec.parse(self._config["voice_hotkey"])
+        self._typeless_last_tap_completed_at: Optional[float] = None
+        self._typeless_close_timer: Optional[threading.Timer] = None
+        self._unified_input_release_timer: Optional[threading.Timer] = None
         self._voice_audio_start_fallback_pending = False
         self._voice_audio_started_waiting_for_legacy_f5 = False
         # Raw Input and the ATVV control channel arrive on different worker
@@ -144,7 +180,39 @@ class RC003App:
         # While the tap side channel is live, the keyboard Raw Input path
         # stands down so the same physical edge is not armed/dispatched twice.
         self._direct_hid_tap_active = False
+        # The settings window is a separate process and cannot own the same
+        # Frida tap.  Mirror physical edges to its observation-only local
+        # relay; failure here must never affect button/audio processing.
+        self._button_detection_publisher = (
+            button_detection_relay.ButtonDetectionPublisher()
+        )
         self._playback: Optional[audio_playback.EndpointPlaybackSink] = None
+        self._unified_audio_router: Optional[
+            unified_audio_router.UnifiedAudioRouter
+        ] = None
+        if bool(self._config.get("unified_virtual_input_enabled", False)):
+            unified_output_name = str(
+                self._config.get("output_endpoint_name", "")
+            )
+            self._unified_audio_router = unified_audio_router.UnifiedAudioRouter(
+                config_root=self._config_root,
+                output_name=unified_output_name,
+                output_host_api=str(
+                    self._config.get("output_endpoint_host_api", "")
+                ),
+                system_input_name=str(
+                    self._config.get("system_input_endpoint_name", "")
+                ),
+                system_input_host_api=str(
+                    self._config.get("system_input_endpoint_host_api", "")
+                ),
+                on_demand_system_input=bool(
+                    self._config.get("unified_on_demand_enabled", True)
+                )
+                and audio_output.is_cable_input_endpoint(unified_output_name),
+                logger=self._logger,
+                on_remote_failure=self._on_unified_remote_failure,
+            )
         self._voice_pcm_stats = PcmStats()
 
         self._supervisor = connection_supervisor.ConnectionSupervisor(
@@ -158,10 +226,25 @@ class RC003App:
     # -- lifecycle: driven by ConnectionSupervisor -------------------------
 
     async def run_forever(self) -> None:
+        if self._unified_audio_router is not None:
+            self._unified_audio_router.start()
         await self._supervisor.run_forever()
 
     async def stop(self) -> None:
-        await self._supervisor.stop()
+        try:
+            await self._supervisor.stop()
+        finally:
+            try:
+                if self._unified_audio_router is not None:
+                    self._unified_audio_router.end_remote()
+                    self._unified_audio_router.close()
+            finally:
+                self._text_menu.shutdown()
+
+    def request_stop(self) -> None:
+        """May be called by the Win32 bridge-control watcher."""
+
+        self._supervisor.request_stop()
 
     async def _connect_once(self) -> None:
         self._logger.info("startup: resolving RC003 identity")
@@ -287,7 +370,9 @@ class RC003App:
         try:
             if tap.start():
                 self._hid_report_tap = tap
-                self._logger.info("startup: RC003 HID report tap enabled")
+                self._logger.info(
+                    "startup: RC003 HID report tap thread started: %s", tap.status
+                )
             else:
                 self._logger.info(
                     "startup: RC003 HID report tap unavailable: %s", tap.status
@@ -327,7 +412,11 @@ class RC003App:
             self._direct_hid_tap_active = True
         for usage in sorted(pressed):
             button = frida_compat.TAP_USAGE_TO_BUTTON[usage]
+            self._button_detection_publisher.publish(button, True)
             if button == "mic":
+                if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                    self._logger.info("voice Typeless physical HID edge: down")
+                    self._on_button_event(button, True)
                 continue
             self._logger.info(
                 "RC003 direct HID usage down: 0x%04x -> %s",
@@ -338,7 +427,11 @@ class RC003App:
             self._on_button_event(button, True)
         for usage in sorted(released):
             button = frida_compat.TAP_USAGE_TO_BUTTON[usage]
+            self._button_detection_publisher.publish(button, False)
             if button == "mic":
+                if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                    self._logger.info("voice Typeless physical HID edge: up")
+                    self._on_button_event(button, False)
                 continue
             self._logger.info(
                 "RC003 direct HID usage up: 0x%04x -> %s",
@@ -349,11 +442,13 @@ class RC003App:
             self._on_button_event(button, False)
 
     def _arm_from_direct_usage(self, usage: int, is_pressed: bool) -> None:
-        """Arm the exact physical edge seen by the tap's socket thread.
+        """Track the exact physical key seen by the tap's socket thread.
 
         Uses the same vk/scan/extended values the low-level hook observes for
-        that physical key, so ``consume_armed_key_event`` matches regardless
-        of whether the arm arrived from Raw Input or from the tap.
+        that physical key. The stable direct-HID hold lets the hook consume
+        Windows' repeated key-down records until the matching key-up arrives.
+        The initial down remains armed as well to cover the opposite ordering,
+        where the low-level hook fires just before the tap reports the hold.
         """
 
         suppressor = self._legacy_key_suppressor
@@ -365,7 +460,11 @@ class RC003App:
         vk_code, make_code, extended = key
         if vk_code == 0x74:
             return
-        suppressor.arm_key_event(vk_code, make_code, extended, is_pressed)
+        suppressor.track_direct_key_hold(
+            vk_code, make_code, extended, is_pressed
+        )
+        if is_pressed:
+            suppressor.arm_key_event(vk_code, make_code, extended, True)
 
 
     async def _cleanup_once(self) -> None:
@@ -383,6 +482,18 @@ class RC003App:
 
         failures: List[str] = []
 
+        if self._unified_audio_router is not None:
+            # The router itself survives BLE reconnects so the selected
+            # system microphone keeps feeding VB-CABLE. Only RC003 priority
+            # ends here; disconnect/error cleanup always restores system mic.
+            try:
+                self._unified_audio_router.end_remote()
+            except Exception:
+                self._logger.exception(
+                    "cleanup: restoring unified system microphone failed"
+                )
+                failures.append("unified system microphone restore failed")
+
         if self._hid_report_tap is not None:
             try:
                 self._hid_report_tap.stop()
@@ -393,6 +504,7 @@ class RC003App:
         with self._direct_hid_lock:
             self._direct_hid_usages.clear()
         self._direct_hid_tap_active = False
+        self._button_detection_publisher.close()
 
         # Cancel gesture timers before stopping Raw Input. The listener's
         # forced releases then clear the dispatcher state without a late
@@ -401,6 +513,12 @@ class RC003App:
 
         try:
             with self._voice_trigger_lock:
+                if self._typeless_close_timer is not None:
+                    self._typeless_close_timer.cancel()
+                    self._typeless_close_timer = None
+                if self._unified_input_release_timer is not None:
+                    self._unified_input_release_timer.cancel()
+                    self._unified_input_release_timer = None
                 self._voice_audio_start_fallback_pending = False
                 self._voice_audio_started_waiting_for_legacy_f5 = False
                 self._voice_raw_input_trigger_pending = False
@@ -477,11 +595,23 @@ class RC003App:
     # -- disconnect / error callbacks: hand off to the supervisor ----------
 
     def _on_disconnected(self) -> None:
+        if self._unified_audio_router is not None:
+            self._unified_audio_router.end_remote()
         self._logger.info("BLE reported disconnected; requesting reconnect")
         self._supervisor.request_reconnect()
 
     def _on_session_error(self, exc: BaseException) -> None:
+        if self._unified_audio_router is not None:
+            self._unified_audio_router.end_remote()
         self._logger.info("ATVV protocol error, requesting reconnect: %s", exc)
+        self._supervisor.request_reconnect()
+
+    def _on_unified_remote_failure(self) -> None:
+        """Called cross-thread after the sole virtual-output owner fails."""
+
+        self._logger.info(
+            "unified audio failed during RC003 priority; requesting reconnect"
+        )
         self._supervisor.request_reconnect()
 
     def _legacy_voice_transform_enabled(self) -> bool:
@@ -616,6 +746,15 @@ class RC003App:
         action is delivered.
         """
 
+        # When the direct tap is live it owns publishing as well as dispatch,
+        # avoiding duplicate detection edges for ordinary keys.  Raw Input
+        # remains the relay fallback on systems where the optional tap is not
+        # active.
+        if event.button_id is not None and not self._direct_hid_tap_active:
+            self._button_detection_publisher.publish(
+                event.button_id, event.is_pressed
+            )
+
         suppressor = self._legacy_key_suppressor
         if (
             suppressor is None
@@ -674,14 +813,53 @@ class RC003App:
         self._bindings_mtime_ns = current_mtime_ns
         self._logger.info("settings mappings reloaded from disk")
 
+    def _input_text_menu_selection(self, text: Optional[str]) -> None:
+        """Input a remote- or mouse-confirmed text-menu selection."""
+
+        if not text:
+            return
+        try:
+            win32_input.send_text(text)
+        except win32_input.Win32InputUnavailableError:
+            self._logger.info("text menu selection skipped: SendInput unavailable")
+        except OSError:
+            self._logger.exception("text menu selection input failed")
+
     def _on_button_event(
         self, button_id: str, is_pressed: bool, *, host_action_handled: bool = False
     ) -> None:
         self._reload_bindings_if_changed()
-        if button_id == "mic":
+        if button_id in self._text_menu_consumed_buttons:
+            if not is_pressed:
+                self._text_menu_consumed_buttons.discard(button_id)
+            return
+        if self._text_menu.is_open and button_id in _TEXT_MENU_NAV_BUTTONS:
             if not is_pressed:
                 return
+            self._text_menu_consumed_buttons.add(button_id)
+            if button_id == "up":
+                self._text_menu.move(-1)
+            elif button_id == "down":
+                self._text_menu.move(1)
+            elif button_id == "back":
+                self._text_menu.close()
+            else:
+                text = self._text_menu.confirm()
+                self._input_text_menu_selection(text)
+            return
+        if button_id == "mic":
+            if not is_pressed:
+                with self._voice_trigger_lock:
+                    self._schedule_unified_restore_after_release_locked()
+                    if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                        self._request_typeless_close_locked("physical mic release")
+                return
             with self._voice_trigger_lock:
+                self._cancel_unified_release_timer_locked()
+                if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                    self._cancel_typeless_release_timer_locked(
+                        "physical mic pressed again"
+                    )
                 if self._voice.active:
                     self._logger.info(
                         "voice physical trigger ignored: voice session already active"
@@ -732,6 +910,23 @@ class RC003App:
         return action.kind != key_mapping.ActionKind.VOICE
 
     def _is_button_repeatable(self, button_id: str) -> bool:
+        action = key_mapping.button_action_for(
+            self._bindings,
+            button_id,
+            key_mapping.ButtonTrigger.SINGLE_CLICK,
+        )
+        # Scroll/page actions are deliberately hold-repeatable no matter
+        # which physical button the user assigns them to.  Legacy keyboard
+        # actions keep the narrower directional/back/volume whitelist so an
+        # OK button mapped to Return can never resume the old auto-newline
+        # behavior while held.
+        if action.kind in {
+            key_mapping.ActionKind.SCROLL_UP,
+            key_mapping.ActionKind.SCROLL_DOWN,
+            key_mapping.ActionKind.PAGE_UP,
+            key_mapping.ActionKind.PAGE_DOWN,
+        }:
+            return True
         if button_id not in {
             "up",
             "down",
@@ -742,11 +937,6 @@ class RC003App:
             "volume_down",
         }:
             return False
-        action = key_mapping.button_action_for(
-            self._bindings,
-            button_id,
-            key_mapping.ButtonTrigger.SINGLE_CLICK,
-        )
         return key_mapping.action_allows_repeat(action)
 
     def _on_button_trigger(
@@ -807,6 +997,54 @@ class RC003App:
                 win32_input.send_volume_mute()
             elif action.kind == key_mapping.ActionKind.PLAY_PAUSE:
                 win32_input.send_play_pause()
+            elif action.kind == key_mapping.ActionKind.SCROLL_UP:
+                win32_input.send_mouse_wheel_up()
+            elif action.kind == key_mapping.ActionKind.SCROLL_DOWN:
+                win32_input.send_mouse_wheel_down()
+            elif action.kind == key_mapping.ActionKind.PAGE_UP:
+                win32_input.send_page_up()
+            elif action.kind == key_mapping.ActionKind.PAGE_DOWN:
+                win32_input.send_page_down()
+            elif action.kind == key_mapping.ActionKind.VIRTUAL_DESKTOP_LEFT:
+                win32_input.send_virtual_desktop_left()
+            elif action.kind == key_mapping.ActionKind.VIRTUAL_DESKTOP_RIGHT:
+                win32_input.send_virtual_desktop_right()
+            elif action.kind == key_mapping.ActionKind.TASK_VIEW:
+                win32_input.send_task_view()
+            elif action.kind == key_mapping.ActionKind.CLIPBOARD_HISTORY:
+                win32_input.send_clipboard_history()
+            elif action.kind == key_mapping.ActionKind.PREVIOUS_TAB:
+                win32_input.send_previous_tab()
+            elif action.kind == key_mapping.ActionKind.NEXT_TAB:
+                win32_input.send_next_tab()
+            elif action.kind == key_mapping.ActionKind.BROWSER_BACK:
+                win32_input.send_browser_back()
+            elif action.kind == key_mapping.ActionKind.BROWSER_FORWARD:
+                win32_input.send_browser_forward()
+            elif action.kind == key_mapping.ActionKind.SNAP_WINDOW_LEFT:
+                win32_input.send_snap_window_left()
+            elif action.kind == key_mapping.ActionKind.SNAP_WINDOW_RIGHT:
+                win32_input.send_snap_window_right()
+            elif action.kind == key_mapping.ActionKind.MAXIMIZE_WINDOW:
+                win32_input.send_maximize_window()
+            elif action.kind == key_mapping.ActionKind.RESTORE_MINIMIZE_WINDOW:
+                win32_input.send_restore_minimize_window()
+            elif action.kind == key_mapping.ActionKind.TYPE_TEXT:
+                win32_input.send_text(action.text)
+            elif action.kind == key_mapping.ActionKind.OPEN_TEXT_MENU:
+                try:
+                    items = key_mapping.normalize_text_menu_items(
+                        self._bindings.get("text_menu_items", [])
+                    )
+                except (TypeError, ValueError):
+                    self._logger.warning("text menu action ignored: invalid menu items")
+                else:
+                    if not self._text_menu.toggle(items):
+                        self._logger.info("text menu closed or has no enabled items")
+            elif action.kind == key_mapping.ActionKind.TYPE_TEXT_AND_SUBMIT:
+                win32_input.send_text(action.text)
+            elif action.kind == key_mapping.ActionKind.TYPE_EXECUTE_AND_SUBMIT:
+                win32_input.send_text("执行")
             elif action_executor.is_application_action(action):
                 if not open_configured_application(action):
                     self._logger.warning(
@@ -860,8 +1098,13 @@ class RC003App:
         elif isinstance(event, AudioStarted):
             with self._voice_trigger_lock:
                 self._logger.info("voice audio started")
+                self._cancel_unified_release_timer_locked()
                 self._voice_pcm_stats.reset()
                 self._voice_audio_start_fallback_pending = False
+                if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                    self._cancel_typeless_release_timer_locked(
+                        "audio restarted before stable release"
+                    )
                 if not self._voice.active:
                     if self._legacy_voice_transform_enabled():
                         self._logger.info(
@@ -876,6 +1119,9 @@ class RC003App:
         elif isinstance(event, AudioStopped):
             with self._voice_trigger_lock:
                 self._logger.info("voice audio stopped")
+                self._cancel_unified_release_timer_locked()
+                if self._unified_audio_router is not None:
+                    self._unified_audio_router.end_remote()
                 stats = self._voice_pcm_stats.summary()
                 self._logger.info(
                     "voice PCM summary: frames=%s samples=%s audio_ms=%.0f "
@@ -896,7 +1142,21 @@ class RC003App:
                 self._voice_audio_start_fallback_pending = False
                 self._voice_audio_started_waiting_for_legacy_f5 = False
                 self._voice_raw_input_trigger_pending = False
-                action = self._voice.on_audio_stopped()
+                if self._voice.trigger_mode == key_mapping.VoiceTriggerMode.TYPELESS:
+                    self._request_typeless_close_locked("ATVV AUDIO_STOP")
+                    action = None
+                elif (
+                    self._voice.trigger_mode
+                    == key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY
+                ):
+                    self._logger.info(
+                        "voice Typeless diagnostic mode: AUDIO_STOP observed; "
+                        "automatic closing Right-Alt intentionally suppressed"
+                    )
+                    self._request_typeless_close_locked("ATVV AUDIO_STOP")
+                    action = None
+                else:
+                    action = self._voice.on_audio_stopped()
                 transformed_session = self._voice_legacy_transform_session
                 action_applied = (
                     True
@@ -920,6 +1180,127 @@ class RC003App:
                         "requesting reconnect"
                     )
                     self._supervisor.request_reconnect()
+
+    def _schedule_unified_restore_after_release_locked(self) -> None:
+        router = self._unified_audio_router
+        if router is None or not router.remote_active:
+            return
+        self._cancel_unified_release_timer_locked()
+        timer = threading.Timer(
+            _UNIFIED_INPUT_RELEASE_DEBOUNCE_SECONDS,
+            self._restore_unified_input_after_release,
+        )
+        timer.daemon = True
+        self._unified_input_release_timer = timer
+        timer.start()
+
+    def _cancel_unified_release_timer_locked(self) -> None:
+        timer = self._unified_input_release_timer
+        if timer is not None:
+            timer.cancel()
+            self._unified_input_release_timer = None
+
+    def _restore_unified_input_after_release(self) -> None:
+        with self._voice_trigger_lock:
+            self._unified_input_release_timer = None
+            if self._physical_mic_is_down():
+                return
+            router = self._unified_audio_router
+            if router is not None:
+                router.end_remote()
+
+    def _physical_mic_is_down(self) -> bool:
+        with self._direct_hid_lock:
+            direct_hid_down = bool(self._direct_hid_usages & _MIC_HID_USAGES)
+        # Once the direct tap has supplied a full keyboard snapshot, that
+        # snapshot is authoritative.  The global low-level F5 callback is
+        # delivered on a different thread and its UP can arrive slightly
+        # later (or be dropped by Windows hook timeout); treating that stale
+        # latch as an additional held source can otherwise suppress the only
+        # Typeless close after the tap has already proved the key is up.
+        if self._direct_hid_tap_active:
+            return direct_hid_down
+        return self._legacy_f5_is_down
+
+    def _request_typeless_close_locked(self, source: str) -> None:
+        """Close or re-arm Typeless after one stable physical release.
+
+        RC003 can report ATVV AUDIO_STOP before Windows delivers the matching
+        HID/F5 key-up, and can briefly report UP/STOP then DOWN/START while the
+        user's finger is visibly still down.  Require a quiet release window
+        so that bounce cannot emit a closing tap or re-arm start-only mode for
+        a duplicate opening tap.
+        """
+
+        if (
+            self._voice.trigger_mode not in _TYPELESS_PHYSICAL_MODES
+            or not self._voice.active
+        ):
+            return
+        if self._physical_mic_is_down():
+            self._logger.info(
+                "voice Typeless close deferred: %s arrived while physical mic is down",
+                source,
+            )
+            return
+        if self._typeless_close_timer is not None:
+            return
+
+        remaining = _TYPELESS_STABLE_RELEASE_SECONDS
+        if self._typeless_last_tap_completed_at is not None:
+            remaining = max(
+                remaining,
+                _TYPELESS_MIN_TAP_INTERVAL_SECONDS
+                - (time.monotonic() - self._typeless_last_tap_completed_at),
+            )
+        self._logger.info(
+            "voice Typeless stable-release action scheduled in %.0f ms: %s",
+            remaining * 1000,
+            source,
+        )
+        timer = threading.Timer(remaining, self._finish_typeless_close_from_timer)
+        timer.daemon = True
+        self._typeless_close_timer = timer
+        timer.start()
+
+    def _cancel_typeless_release_timer_locked(self, source: str) -> None:
+        timer = self._typeless_close_timer
+        if timer is None:
+            return
+        timer.cancel()
+        self._typeless_close_timer = None
+        self._logger.info("voice Typeless unstable release ignored: %s", source)
+
+    def _finish_typeless_close_from_timer(self) -> None:
+        with self._voice_trigger_lock:
+            self._typeless_close_timer = None
+            if self._physical_mic_is_down():
+                self._logger.info(
+                    "voice Typeless scheduled close skipped: physical mic is down again"
+                )
+                return
+            if (
+                self._voice.trigger_mode
+                == key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY
+            ):
+                self._voice.cancel_pending()
+                self._logger.info(
+                    "voice Typeless diagnostic mode re-armed after stable release"
+                )
+                return
+            self._finish_typeless_close_locked()
+
+    def _finish_typeless_close_locked(self) -> None:
+        action = self._voice.on_audio_stopped()
+        if action is None:
+            return
+        if self._apply_voice_action(action):
+            return
+        self._voice.restore_pending(action)
+        self._logger.info(
+            "voice Typeless physical-release action failed; requesting reconnect"
+        )
+        self._supervisor.request_reconnect()
 
     def _handle_mic_button_pressed(
         self,
@@ -969,6 +1350,8 @@ class RC003App:
             self._logger.info(
                 "voice failing closed: host hotkey delivery failed; MIC_OPEN suppressed"
             )
+            if self._unified_audio_router is not None:
+                self._unified_audio_router.end_remote()
             return
 
         if send_device_open and self._ble_session is not None:
@@ -1007,11 +1390,30 @@ class RC003App:
             return True
         try:
             if action == voice_controller.VoiceHostAction.TAP:
-                win32_input.send_voice_key_combo_tap(tokens)
+                if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                    # Typeless accepts normal injected input (as proven by
+                    # the working AutoHotkey bridge).  Keep it off Doubao's
+                    # physicalized two-edge backend: an observed/missed UP
+                    # edge there can look like a held Right Alt to Typeless.
+                    win32_input.send_typeless_key_combo_tap(tokens)
+                    self._typeless_last_tap_completed_at = time.monotonic()
+                    backend = "sendinput_timed_typeless"
+                else:
+                    win32_input.send_voice_key_combo_tap(tokens)
+                    backend = win32_input.voice_backend_name()
             elif action == voice_controller.VoiceHostAction.KEY_DOWN:
                 win32_input.send_voice_key_combo_down(tokens)
+                backend = win32_input.voice_backend_name()
             else:
                 win32_input.send_voice_key_combo_up(tokens)
+                backend = win32_input.voice_backend_name()
+            self._logger.info(
+                "voice host shortcut delivered: mode=%s action=%s keys=%s backend=%s",
+                self._voice.trigger_mode.value,
+                action.value,
+                "+".join(tokens),
+                backend,
+            )
             return True
         except win32_input.Win32InputUnavailableError:
             self._logger.info("voice hotkey action skipped: no usable voice input backend")
@@ -1021,6 +1423,19 @@ class RC003App:
             return False
 
     def _open_playback_for_new_session(self) -> bool:
+        if self._unified_audio_router is not None:
+            try:
+                if self._unified_audio_router.begin_remote():
+                    self._logger.info(
+                        "unified audio source switched to RC003; system input paused"
+                    )
+                    return True
+            except Exception:
+                self._logger.exception(
+                    "unified audio failed to enter RC003 priority, failing closed"
+                )
+            self._unified_audio_router.end_remote()
+            return False
         if self._playback is not None:
             return True
         endpoint_name = self._config.get("output_endpoint_name") or ""
@@ -1065,7 +1480,7 @@ class RC003App:
         safe to call cross-thread (see connection_supervisor.py).
         """
 
-        if self._playback is None:
+        if self._playback is None and self._unified_audio_router is None:
             return
         try:
             self._voice_pcm_stats.add(samples)
@@ -1081,25 +1496,59 @@ class RC003App:
                     stats["mean_abs"],
                     stats["clipped_pct"],
                 )
-            self._playback.write(samples)
+            if self._unified_audio_router is not None:
+                if not self._unified_audio_router.write_remote(samples):
+                    self._logger.info(
+                        "unified audio rejected RC003 PCM; failing voice session closed"
+                    )
+                    self._supervisor.request_reconnect()
+            else:
+                self._playback.write(samples)
         except Exception:
             self._logger.exception("audio playback write failed; failing closed")
-            try:
-                self._playback.close()
-                self._playback = None
-            except Exception:
-                self._logger.exception("cleanup: closing the failed playback sink failed")
-                # self._playback is intentionally NOT cleared here: it may
-                # still own a live PortAudio stream.
+            if self._unified_audio_router is not None:
+                self._unified_audio_router.end_remote()
+            elif self._playback is not None:
+                try:
+                    self._playback.close()
+                    self._playback = None
+                except Exception:
+                    self._logger.exception("cleanup: closing the failed playback sink failed")
+                    # self._playback is intentionally NOT cleared here: it may
+                    # still own a live PortAudio stream.
             self._supervisor.request_reconnect()
 
 
+async def _watch_bridge_stop(control, app: RC003App, run_task: asyncio.Task) -> None:
+    while not control.stop_requested():
+        await asyncio.sleep(0.1)
+    app.request_stop()
+    # request_stop() wakes an established connection, while cancellation also
+    # interrupts a bridge currently blocked in BLE discovery or retry sleep.
+    # ConnectionSupervisor's finally block still performs the same cleanup.
+    run_task.cancel()
+
+
 async def _run() -> None:
+    from . import bridge_control_windows
+
     app = RC003App()
-    try:
-        await app.run_forever()
-    finally:
-        await app.stop()
+    with bridge_control_windows.BridgeStopEventOwner() as control:
+        run_task = asyncio.create_task(app.run_forever())
+        watcher = asyncio.create_task(_watch_bridge_stop(control, app, run_task))
+        try:
+            try:
+                await run_task
+            except asyncio.CancelledError:
+                # Cancellation is the expected control path only when the
+                # named stop event is signaled. Preserve unrelated task
+                # cancellation instead of silently converting it to success.
+                if not control.stop_requested():
+                    raise
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            await app.stop()
 
 
 def main() -> None:

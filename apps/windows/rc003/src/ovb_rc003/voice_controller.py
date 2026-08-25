@@ -11,14 +11,17 @@ Semantics (frozen by XRBM-018, replacing the XRBM-014 RETRY
 P1 #4 fix below it - see the XRBM-014 round 2 replan-check finding
 "Toggle release edge absent"):
 
-- TOGGLE mode issues a key TAP on mic-button-press (starting the configured
-  host voice shortcut) and issues ANOTHER TAP when the device's own
-  AUDIO_STOP arrives (turning that same OS-level toggle back off). A single
+- TOGGLE and TYPELESS modes issue a key TAP on mic-button-press (starting the configured
+  host voice shortcut) and issue ANOTHER TAP when the session closes
+  (turning that same OS-level toggle back off). TYPELESS wiring closes on the
+  physical release edge; TOGGLE closes on the device's AUDIO_STOP. A single
   tap-only-on-press action (the previous XRBM-014 RETRY P1 #4 fix) avoided
   holding a modifier "stuck" for the duration of the stream, but left
   the host voice mode running indefinitely after the device stopped
   streaming, since the configured toggle shortcut needs a second press to
   turn back off.
+- TYPELESS pairs those two taps with Right Alt, matching Typeless for
+  Windows: one tap starts dictation and the second tap finishes it.
 - HOLD mode still holds the key down for the duration of the stream:
   key-down on mic-button-press, key-up when the device's own AUDIO_STOP
   arrives.

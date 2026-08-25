@@ -103,7 +103,9 @@ from typing import Dict, List, Optional
 
 from . import (
     audio_output,
+    autostart_windows,
     bridge_launcher,
+    button_detection_relay,
     config,
     device_catalog,
     hotkey,
@@ -115,6 +117,7 @@ from . import (
     resources,
     settings_ui,
     shell_targets,
+    unified_audio_router,
     vb_cable_bundle,
     windows_diagnostics,
 )
@@ -643,7 +646,17 @@ def _load_qt_classes() -> dict:
         triggerModeIndexChanged = Signal()
         endpointOptionsChanged = Signal()
         selectedEndpointIndexChanged = Signal()
+        showAllAudioEndpointsChanged = Signal()
+        endpointBridgeHelpTextChanged = Signal()
+        selectedEndpointSupportsOnDemandChanged = Signal()
+        unifiedVirtualInputEnabledChanged = Signal()
+        unifiedOnDemandEnabledChanged = Signal()
+        systemInputOptionsChanged = Signal()
+        selectedSystemInputIndexChanged = Signal()
+        unifiedAudioStatusTextChanged = Signal()
         launchStatusTextChanged = Signal()
+        bridgeActionTextChanged = Signal()
+        bridgeRunningChanged = Signal()
         statusMessageChanged = Signal()
         errorMessageChanged = Signal()
         selectedButtonIdChanged = Signal()
@@ -652,12 +665,26 @@ def _load_qt_classes() -> dict:
         djiMicStatusTextChanged = Signal()
         keyDetectionActiveChanged = Signal()
         keyDetectionTextChanged = Signal()
+        textMenuItemsChanged = Signal()
+        mappingProfilesChanged = Signal()
+        activeMappingProfileIndexChanged = Signal()
+        canDeleteMappingProfileChanged = Signal()
+        canEditMappingProfileChanged = Signal()
+        autostartEnabledChanged = Signal()
         _rawKeyDetected = Signal(str, str)
         hotkeyCaptured = Signal(str)
         hotkeyCaptureError = Signal(str)
         _hotkeyCaptureResult = Signal(str)
 
-        _TRIGGER_MODE_ORDER = tuple(key_mapping.VoiceTriggerMode)
+        # The start-only Typeless mode remains supported by the runtime for
+        # old configs and diagnostics, but it is deliberately absent from
+        # the everyday settings list: accidentally selecting it leaves the
+        # target dictation session open after RC003 stops sending audio.
+        _TRIGGER_MODE_ORDER = (
+            key_mapping.VoiceTriggerMode.TYPELESS,
+            key_mapping.VoiceTriggerMode.TOGGLE,
+            key_mapping.VoiceTriggerMode.HOLD,
+        )
         _DEVICE_ORDER = tuple(profile.device_id for profile in device_catalog.DEVICE_PROFILES)
 
         def __init__(self, model: "ButtonMappingModel", parent=None) -> None:
@@ -668,6 +695,12 @@ def _load_qt_classes() -> dict:
             self._bindings = config.load_key_bindings(
                 config.key_bindings_path(self._config_root)
             )
+            self._text_menu_items = [
+                item.to_dict()
+                for item in key_mapping.normalize_text_menu_items(
+                    self._bindings.get("text_menu_items", [])
+                )
+            ]
 
             self._hotkey_text = self._config.get(
                 "voice_hotkey", hotkey.DEFAULT_VOICE_HOTKEY.serialize()
@@ -675,9 +708,19 @@ def _load_qt_classes() -> dict:
             saved_trigger_mode = key_mapping.VoiceTriggerMode(
                 self._config.get("voice_trigger_mode", "toggle")
             )
+            if saved_trigger_mode == key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY:
+                saved_trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
             self._trigger_mode_index = self._TRIGGER_MODE_ORDER.index(saved_trigger_mode)
 
             self._launch_status_text = settings_ui.LAUNCH_NOT_STARTED_TEXT
+            try:
+                self._autostart_enabled = autostart_windows.is_enabled()
+            except Exception:  # noqa: BLE001 - settings must still open
+                self._autostart_enabled = False
+            try:
+                self._bridge_running = bridge_launcher.is_bridge_running()
+            except Exception:  # noqa: BLE001 - status probe must not break settings startup
+                self._bridge_running = False
             self._status_message = ""
             self._error_message = ""
             self._selected_button_id = "ok"
@@ -692,6 +735,7 @@ def _load_qt_classes() -> dict:
             )
             self._dji_mic_status_text = ""
             self._key_detection_listener = None
+            self._key_detection_relay_listener = None
             self._key_detection_active = False
             self._key_detection_text = (
                 "尚未检测真实按键。点击“检测真实按键”后，再按一次遥控器按键。"
@@ -701,42 +745,114 @@ def _load_qt_classes() -> dict:
             self._hotkeyCaptureResult.connect(self._on_hotkey_capture_result)
 
             self._endpoint_options: List[str] = []
+            self._show_all_audio_endpoints = False
             self._selected_endpoint_index = -1
             self._refresh_endpoint_options()
+            self._unified_virtual_input_enabled = bool(
+                self._config.get("unified_virtual_input_enabled", False)
+            )
+            self._unified_on_demand_enabled = bool(
+                self._config.get("unified_on_demand_enabled", True)
+            )
+            if (
+                self._selected_endpoint_display()
+                and not self._selected_endpoint_supports_on_demand()
+            ):
+                self._unified_on_demand_enabled = False
+            self._system_input_options: List[str] = []
+            self._selected_system_input_index = -1
+            self._unified_audio_status_text = ""
+            self._refresh_system_input_options()
+            self._refresh_unified_audio_status()
             self._refresh_dji_mic_status()
             self._load_bindings_into_model()
             self._model.set_selected_button(self._selected_button_id)
 
         # -- internal helpers -------------------------------------------------
 
-        def _refresh_endpoint_options(self) -> None:
+        def _refresh_endpoint_options(self, preferred_display: str = "") -> None:
             try:
                 endpoints = audio_output.enumerate_output_endpoints()
-                options = [settings_ui._endpoint_display(e) for e in endpoints]
             except audio_output.AudioOutputUnavailableError:
-                options = []
+                endpoints = []
 
             saved_name = self._config.get("output_endpoint_name", "")
-            saved_display = ""
-            if saved_name:
+            saved_display = preferred_display
+            if not saved_display and saved_name:
                 saved_display = settings_ui._endpoint_display(
                     audio_output.AudioEndpoint(
                         name=saved_name,
                         host_api=self._config.get("output_endpoint_host_api", ""),
                     )
                 )
-            if saved_display and saved_display not in options:
+            all_options = [settings_ui._endpoint_display(e) for e in endpoints]
+            if saved_display and saved_display not in all_options:
                 # The previously-saved device is no longer enumerated (e.g.
                 # unplugged) - still show it as a selectable-but-absent
                 # option rather than silently discarding the user's saved
                 # choice, matching build_save_model()/_parse_endpoint_display()
                 # round-tripping whatever text is present at save time.
-                options = [saved_display] + options
+                all_options = [saved_display] + all_options
+
+            options = (
+                all_options
+                if self._show_all_audio_endpoints
+                else settings_ui.compact_bridge_endpoint_options(
+                    endpoints, current_display=saved_display
+                )
+            )
 
             self._endpoint_options = options
             self._selected_endpoint_index = (
                 options.index(saved_display) if saved_display in options else -1
             )
+
+        def _selected_endpoint_display(self) -> str:
+            if 0 <= self._selected_endpoint_index < len(self._endpoint_options):
+                return self._endpoint_options[self._selected_endpoint_index]
+            return ""
+
+        def _selected_endpoint_supports_on_demand(self) -> bool:
+            name, _host_api = settings_ui._parse_endpoint_display(
+                self._selected_endpoint_display()
+            )
+            return audio_output.is_cable_input_endpoint(name)
+
+        def _refresh_system_input_options(self, preferred_display: str = "") -> None:
+            try:
+                endpoints = [
+                    endpoint
+                    for endpoint in audio_output.enumerate_input_endpoints()
+                    if not audio_output.is_cable_output_endpoint(endpoint.name)
+                ]
+                options = [settings_ui._endpoint_display(e) for e in endpoints]
+            except audio_output.AudioOutputUnavailableError:
+                options = []
+            saved_name = str(self._config.get("system_input_endpoint_name", ""))
+            saved_display = preferred_display
+            if not saved_display and saved_name:
+                saved_display = settings_ui._endpoint_display(
+                    audio_output.AudioEndpoint(
+                        name=saved_name,
+                        host_api=str(
+                            self._config.get("system_input_endpoint_host_api", "")
+                        ),
+                    )
+                )
+            if saved_display and saved_display not in options:
+                options = [saved_display] + options
+            self._system_input_options = options
+            self._selected_system_input_index = (
+                options.index(saved_display) if saved_display in options else -1
+            )
+
+        def _refresh_unified_audio_status(self) -> None:
+            text = unified_audio_router.describe_status(
+                self._config_root, self._unified_virtual_input_enabled
+            )
+            if text != self._unified_audio_status_text:
+                self._unified_audio_status_text = text
+                self.unifiedAudioStatusTextChanged.emit()
 
         def _load_bindings_into_model(self) -> None:
             bindings = self._bindings.get("bindings", {})
@@ -791,6 +907,41 @@ def _load_qt_classes() -> dict:
             self._launch_status_text = text
             self.launchStatusTextChanged.emit()
 
+        def _set_bridge_running(self, running: bool) -> None:
+            running = bool(running)
+            if running == self._bridge_running:
+                return
+            self._bridge_running = running
+            self.bridgeActionTextChanged.emit()
+            self.bridgeRunningChanged.emit()
+
+        def _ensure_mapping_bridge_running(self) -> bool:
+            """Make a newly saved/switched RC003 mapping usable immediately."""
+
+            if self._selected_device_id() != device_catalog.RC003_ID:
+                return False
+            try:
+                if bridge_launcher.is_bridge_running():
+                    self._set_bridge_running(True)
+                    return True
+                result = bridge_launcher.launch_bridge()
+            except Exception as exc:  # noqa: BLE001 - keep the settings UI alive
+                self._set_bridge_running(False)
+                self._set_error_message(f"按键方案已保存，但桥接启动失败：{exc}")
+                return False
+            self._set_launch_status(settings_ui.describe_launch_result(result))
+            running = result.outcome in {
+                bridge_launcher.LaunchOutcome.STARTED,
+                bridge_launcher.LaunchOutcome.ALREADY_RUNNING,
+            }
+            self._set_bridge_running(running)
+            if not running:
+                detail = settings_ui.describe_launch_result(result)
+                self._set_error_message(
+                    f"按键方案已保存，但桥接没有启动：{detail}"
+                )
+            return running
+
         def _set_status_message(self, text: str) -> None:
             self._status_message = text
             self.statusMessageChanged.emit()
@@ -827,6 +978,14 @@ def _load_qt_classes() -> dict:
             details += f" Signature={signature}"
             self._rawKeyDetected.emit(event.button_id or "", details)
 
+        def _on_relay_button_event(self, button_id: str, is_pressed: bool) -> None:
+            if not is_pressed:
+                return
+            self._rawKeyDetected.emit(
+                button_id,
+                "桥接进程原始 HID 检测事件（未执行此检测页中的映射）。",
+            )
+
         def _on_raw_key_detected(self, button_id: str, details: str) -> None:
             """Handle one physical press on the Qt GUI thread.
 
@@ -853,33 +1012,19 @@ def _load_qt_classes() -> dict:
 
         def _on_hotkey_capture_result(self, chord: str) -> None:
             """Forward a hook-thread result to QML on the GUI thread."""
-
-            inferred_mode = key_mapping.voice_trigger_mode_for_hotkey(chord)
-            if inferred_mode is not None:
-                self._set_trigger_mode_preserving_hotkey(inferred_mode)
             self.hotkeyCaptured.emit(chord)
 
-        def _set_trigger_mode_preserving_hotkey(
-            self, trigger_mode: key_mapping.VoiceTriggerMode
-        ) -> None:
-            """Change the mode preset without overwriting a just-recorded chord."""
-
-            index = self._TRIGGER_MODE_ORDER.index(trigger_mode)
-            if index != self._trigger_mode_index:
-                self._trigger_mode_index = index
-                self.triggerModeIndexChanged.emit()
-
-        def _save(self) -> bool:
-            """Same validation as before (settings_ui.build_save_model);
-            returns True only on an actual successful save, so
-            saveAndLaunch() can gate the launch on it exactly like the
-            previous Tk _save_and_launch() did.
-            """
-
+        def _build_pending_save_model(self):
+            """Validate the visible editor state without writing any file."""
             trigger_mode = self._TRIGGER_MODE_ORDER[self._trigger_mode_index]
             endpoint_display = (
                 self._endpoint_options[self._selected_endpoint_index]
                 if 0 <= self._selected_endpoint_index < len(self._endpoint_options)
+                else ""
+            )
+            system_input_display = (
+                self._system_input_options[self._selected_system_input_index]
+                if 0 <= self._selected_system_input_index < len(self._system_input_options)
                 else ""
             )
             try:
@@ -892,11 +1037,34 @@ def _load_qt_classes() -> dict:
                     base_config=self._config,
                     base_bindings=self._bindings,
                     selected_device_profile=self._selected_device_id(),
+                    text_menu_items=self._text_menu_items,
+                    unified_virtual_input_enabled=self._unified_virtual_input_enabled,
+                    unified_on_demand_enabled=self._unified_on_demand_enabled,
+                    system_input_endpoint_display_text=system_input_display,
                 )
             except settings_ui.SettingsValidationError as exc:
-                title = f"「{exc.button_id}」映射无效" if exc.button_id else "语音热键无效"
+                title = f"「{exc.button_id}」映射无效" if exc.button_id else "设置无效"
                 self._set_error_message(f"{title}：{exc.message}")
-                return False
+                return None
+            return new_config, new_bindings
+
+        def _adopt_saved_bindings(self, saved_bindings: dict) -> None:
+            self._bindings = saved_bindings
+            self._text_menu_items = [
+                item.to_dict()
+                for item in key_mapping.normalize_text_menu_items(
+                    saved_bindings.get("text_menu_items", [])
+                )
+            ]
+            self.textMenuItemsChanged.emit()
+            self.mappingProfilesChanged.emit()
+            self.activeMappingProfileIndexChanged.emit()
+            self.canDeleteMappingProfileChanged.emit()
+            self.canEditMappingProfileChanged.emit()
+            self._load_bindings_into_model()
+
+        def _persist_save_model(self, new_config: dict, new_bindings: dict) -> bool:
+            """Persist and read back through the bridge's normalizers."""
 
             config_path = config.config_path(self._config_root)
             bindings_path = config.key_bindings_path(self._config_root)
@@ -914,8 +1082,14 @@ def _load_qt_classes() -> dict:
                 return False
 
             self._config = saved_config
-            self._bindings = saved_bindings
-            self._load_bindings_into_model()
+            self._unified_virtual_input_enabled = bool(
+                saved_config.get("unified_virtual_input_enabled", False)
+            )
+            self._unified_on_demand_enabled = bool(
+                saved_config.get("unified_on_demand_enabled", True)
+            )
+            self._refresh_unified_audio_status()
+            self._adopt_saved_bindings(saved_bindings)
             self._set_error_message("")
             if self._selected_device_id() == device_catalog.DJI_MIC_2_ID:
                 self._set_status_message(
@@ -924,6 +1098,30 @@ def _load_qt_classes() -> dict:
             else:
                 self._set_status_message("已保存。重启桥接以应用新的连接/输出设置。")
             return True
+
+        def _persist_bindings_document(self, new_bindings: dict) -> bool:
+            """Persist a profile-only operation without changing connection settings."""
+
+            bindings_path = config.key_bindings_path(self._config_root)
+            try:
+                config.save_key_bindings(bindings_path, new_bindings)
+                saved_bindings = config.load_key_bindings(bindings_path)
+            except Exception as exc:  # noqa: BLE001 - a Qt slot must not escape
+                self._set_error_message(f"保存配置方案失败：{exc}")
+                return False
+            self._adopt_saved_bindings(saved_bindings)
+            self._set_error_message("")
+            return True
+
+        def _save(self) -> bool:
+            """Validate, update the active profile and atomically persist it."""
+
+            pending = self._build_pending_save_model()
+            if pending is None:
+                return False
+            new_config, new_bindings = pending
+            new_bindings = config.update_active_mapping_profile(new_bindings)
+            return self._persist_save_model(new_config, new_bindings)
 
         # -- properties ---------------------------------------------------
 
@@ -948,8 +1146,6 @@ def _load_qt_classes() -> dict:
         def _set_trigger_mode_index(self, value: int) -> None:
             if value != self._trigger_mode_index and 0 <= value < len(self._TRIGGER_MODE_ORDER):
                 self._trigger_mode_index = value
-                trigger_mode = self._TRIGGER_MODE_ORDER[value]
-                self._set_hotkey_text(settings_ui.voice_hotkey_for_trigger_mode(trigger_mode))
                 self.triggerModeIndexChanged.emit()
 
         triggerModeIndex = Property(
@@ -970,6 +1166,14 @@ def _load_qt_classes() -> dict:
             if value != self._selected_endpoint_index:
                 self._selected_endpoint_index = value
                 self.selectedEndpointIndexChanged.emit()
+                self.endpointBridgeHelpTextChanged.emit()
+                self.selectedEndpointSupportsOnDemandChanged.emit()
+                if (
+                    not self._selected_endpoint_supports_on_demand()
+                    and self._unified_on_demand_enabled
+                ):
+                    self._unified_on_demand_enabled = False
+                    self.unifiedOnDemandEnabledChanged.emit()
 
         selectedEndpointIndex = Property(
             int,
@@ -978,10 +1182,131 @@ def _load_qt_classes() -> dict:
             notify=selectedEndpointIndexChanged,
         )
 
+        def _get_show_all_audio_endpoints(self) -> bool:
+            return self._show_all_audio_endpoints
+
+        def _set_show_all_audio_endpoints(self, value: bool) -> None:
+            value = bool(value)
+            if value == self._show_all_audio_endpoints:
+                return
+            current_display = self._selected_endpoint_display()
+            self._show_all_audio_endpoints = value
+            self._refresh_endpoint_options(current_display)
+            self.showAllAudioEndpointsChanged.emit()
+            self.endpointOptionsChanged.emit()
+            self.selectedEndpointIndexChanged.emit()
+            self.endpointBridgeHelpTextChanged.emit()
+            self.selectedEndpointSupportsOnDemandChanged.emit()
+
+        showAllAudioEndpoints = Property(
+            bool,
+            _get_show_all_audio_endpoints,
+            _set_show_all_audio_endpoints,
+            notify=showAllAudioEndpointsChanged,
+        )
+
+        def _get_endpoint_bridge_help_text(self) -> str:
+            return settings_ui.bridge_endpoint_help(self._selected_endpoint_display())
+
+        endpointBridgeHelpText = Property(
+            str,
+            _get_endpoint_bridge_help_text,
+            notify=endpointBridgeHelpTextChanged,
+        )
+
+        def _get_selected_endpoint_supports_on_demand(self) -> bool:
+            return self._selected_endpoint_supports_on_demand()
+
+        selectedEndpointSupportsOnDemand = Property(
+            bool,
+            _get_selected_endpoint_supports_on_demand,
+            notify=selectedEndpointSupportsOnDemandChanged,
+        )
+
+        def _get_unified_virtual_input_enabled(self) -> bool:
+            return self._unified_virtual_input_enabled
+
+        def _set_unified_virtual_input_enabled(self, value: bool) -> None:
+            value = bool(value)
+            if value != self._unified_virtual_input_enabled:
+                self._unified_virtual_input_enabled = value
+                self.unifiedVirtualInputEnabledChanged.emit()
+                self._refresh_unified_audio_status()
+
+        unifiedVirtualInputEnabled = Property(
+            bool,
+            _get_unified_virtual_input_enabled,
+            _set_unified_virtual_input_enabled,
+            notify=unifiedVirtualInputEnabledChanged,
+        )
+
+        def _get_unified_on_demand_enabled(self) -> bool:
+            return self._unified_on_demand_enabled
+
+        def _set_unified_on_demand_enabled(self, value: bool) -> None:
+            value = bool(value)
+            if value != self._unified_on_demand_enabled:
+                self._unified_on_demand_enabled = value
+                self.unifiedOnDemandEnabledChanged.emit()
+
+        unifiedOnDemandEnabled = Property(
+            bool,
+            _get_unified_on_demand_enabled,
+            _set_unified_on_demand_enabled,
+            notify=unifiedOnDemandEnabledChanged,
+        )
+
+        def _get_system_input_options(self) -> List[str]:
+            return list(self._system_input_options)
+
+        systemInputOptions = Property(
+            list, _get_system_input_options, notify=systemInputOptionsChanged
+        )
+
+        def _get_selected_system_input_index(self) -> int:
+            return self._selected_system_input_index
+
+        def _set_selected_system_input_index(self, value: int) -> None:
+            if value != self._selected_system_input_index:
+                self._selected_system_input_index = value
+                self.selectedSystemInputIndexChanged.emit()
+
+        selectedSystemInputIndex = Property(
+            int,
+            _get_selected_system_input_index,
+            _set_selected_system_input_index,
+            notify=selectedSystemInputIndexChanged,
+        )
+
+        def _get_unified_audio_status_text(self) -> str:
+            return self._unified_audio_status_text
+
+        unifiedAudioStatusText = Property(
+            str,
+            _get_unified_audio_status_text,
+            notify=unifiedAudioStatusTextChanged,
+        )
+
         def _get_launch_status_text(self) -> str:
             return self._launch_status_text
 
         launchStatusText = Property(str, _get_launch_status_text, notify=launchStatusTextChanged)
+
+        def _get_bridge_action_text(self) -> str:
+            if self._bridge_running:
+                return "保存并重启桥接"
+            return "保存并启动桥接"
+
+        bridgeActionText = Property(
+            str, _get_bridge_action_text, notify=bridgeActionTextChanged
+        )
+
+        def _get_bridge_running(self) -> bool:
+            return self._bridge_running
+
+        bridgeRunning = Property(
+            bool, _get_bridge_running, notify=bridgeRunningChanged
+        )
 
         def _get_status_message(self) -> str:
             return self._status_message
@@ -1105,6 +1430,61 @@ def _load_qt_classes() -> dict:
 
         presetActionOptions = Property(list, _get_preset_action_options, constant=True)
 
+        def _get_mapping_profile_names(self) -> List[str]:
+            return [
+                profile["name"]
+                for profile in config.mapping_profile_summaries(self._bindings)
+            ]
+
+        mappingProfileNames = Property(
+            list, _get_mapping_profile_names, notify=mappingProfilesChanged
+        )
+
+        def _get_active_mapping_profile_index(self) -> int:
+            return config.active_mapping_profile_index(self._bindings)
+
+        activeMappingProfileIndex = Property(
+            int,
+            _get_active_mapping_profile_index,
+            notify=activeMappingProfileIndexChanged,
+        )
+
+        def _get_can_delete_mapping_profile(self) -> bool:
+            return not config.is_system_mapping_profile(self._bindings)
+
+        canDeleteMappingProfile = Property(
+            bool,
+            _get_can_delete_mapping_profile,
+            notify=canDeleteMappingProfileChanged,
+        )
+
+        def _get_can_edit_mapping_profile(self) -> bool:
+            return not config.is_system_mapping_profile(self._bindings)
+
+        canEditMappingProfile = Property(
+            bool,
+            _get_can_edit_mapping_profile,
+            notify=canEditMappingProfileChanged,
+        )
+
+        def _get_text_menu_items(self) -> List[dict]:
+            return [dict(item) for item in self._text_menu_items]
+
+        textMenuItems = Property(
+            list,
+            _get_text_menu_items,
+            notify=textMenuItemsChanged,
+        )
+
+        def _get_autostart_enabled(self) -> bool:
+            return self._autostart_enabled
+
+        autostartEnabled = Property(
+            bool,
+            _get_autostart_enabled,
+            notify=autostartEnabledChanged,
+        )
+
         def _get_mic_row_text(self) -> str:
             return settings_ui._MIC_ROW_DISPLAY
 
@@ -1130,6 +1510,213 @@ def _load_qt_classes() -> dict:
             return self._save()
 
         @Slot()
+        def refreshUnifiedAudioStatus(self) -> None:
+            self._refresh_unified_audio_status()
+
+        @Slot()
+        def refreshSystemInputOptions(self) -> None:
+            current = (
+                self._system_input_options[self._selected_system_input_index]
+                if 0 <= self._selected_system_input_index < len(self._system_input_options)
+                else ""
+            )
+            self._refresh_system_input_options(current)
+            self.systemInputOptionsChanged.emit()
+            self.selectedSystemInputIndexChanged.emit()
+
+        @Slot(bool)
+        def setAutostartEnabled(self, enabled: bool) -> None:
+            try:
+                autostart_windows.set_enabled(enabled)
+                actual = autostart_windows.is_enabled()
+            except Exception as exc:  # noqa: BLE001 - report in the UI
+                self._set_error_message(f"修改登录自启动失败：{exc}")
+                self.autostartEnabledChanged.emit()
+                return
+            if actual != enabled:
+                self._set_error_message("修改登录自启动失败：Windows 未保留该设置。")
+                self.autostartEnabledChanged.emit()
+                return
+            if actual != self._autostart_enabled:
+                self._autostart_enabled = actual
+                self.autostartEnabledChanged.emit()
+            self._set_error_message("")
+            self._set_status_message(
+                "已开启登录 Windows 时自动启动桥接。"
+                if actual
+                else "已关闭登录 Windows 时自动启动桥接。"
+            )
+
+        @Slot(result=bool)
+        def saveMappings(self) -> bool:
+            if config.is_system_mapping_profile(self._bindings):
+                self._set_error_message(
+                    "系统默认方案为只读；请先点击「＋ 新建方案」复制后再编辑。"
+                )
+                return False
+            saved = self._save()
+            if saved and self._selected_device_id() == device_catalog.RC003_ID:
+                if self._ensure_mapping_bridge_running():
+                    self._set_status_message(
+                        "按键映射已保存，桥接正在运行；下一次按键立即生效。"
+                    )
+            return saved
+
+        @Slot(int)
+        def switchMappingProfile(self, index: int) -> None:
+            profiles = config.mapping_profile_summaries(self._bindings)
+            if not (0 <= index < len(profiles)):
+                return
+            if index == config.active_mapping_profile_index(self._bindings):
+                return
+            try:
+                updated = config.activate_mapping_profile(
+                    self._bindings, profiles[index]["id"]
+                )
+            except config.MappingProfileError as exc:
+                self._set_error_message(f"切换配置方案失败：{exc}")
+                return
+            if self._persist_bindings_document(updated):
+                if self._ensure_mapping_bridge_running():
+                    self._set_status_message(
+                        f"已切换到「{profiles[index]['name']}」。页面中尚未保存的映射编辑已放弃；桥接正在运行，新方案将在下一次按键时生效。"
+                    )
+
+        @Slot(str)
+        def createMappingProfile(self, name: str) -> None:
+            pending = self._build_pending_save_model()
+            if pending is None:
+                return
+            new_config, new_bindings = pending
+            try:
+                new_bindings = config.create_mapping_profile(new_bindings, name)
+            except config.MappingProfileError as exc:
+                self._set_error_message(f"新建配置方案失败：{exc}")
+                return
+            if self._persist_save_model(new_config, new_bindings):
+                active_index = config.active_mapping_profile_index(self._bindings)
+                active_name = self._get_mapping_profile_names()[active_index]
+                if self._ensure_mapping_bridge_running():
+                    self._set_status_message(
+                        f"已从当前方案新建「{active_name}」并切换；桥接正在运行。"
+                    )
+
+        @Slot(str)
+        def renameActiveMappingProfile(self, name: str) -> None:
+            profiles = config.mapping_profile_summaries(self._bindings)
+            index = config.active_mapping_profile_index(self._bindings)
+            if not profiles:
+                return
+            try:
+                updated = config.rename_mapping_profile(
+                    self._bindings, profiles[index]["id"], name
+                )
+            except config.MappingProfileError as exc:
+                self._set_error_message(f"重命名配置方案失败：{exc}")
+                return
+            if self._persist_bindings_document(updated):
+                renamed = self._get_mapping_profile_names()[index]
+                self._set_status_message(f"配置方案已重命名为「{renamed}」。")
+
+        @Slot()
+        def deleteActiveMappingProfile(self) -> None:
+            profiles = config.mapping_profile_summaries(self._bindings)
+            index = config.active_mapping_profile_index(self._bindings)
+            if not profiles:
+                return
+            deleted_name = profiles[index]["name"]
+            try:
+                updated = config.delete_mapping_profile(
+                    self._bindings, profiles[index]["id"]
+                )
+            except config.MappingProfileError as exc:
+                self._set_error_message(f"删除配置方案失败：{exc}")
+                return
+            if self._persist_bindings_document(updated):
+                active_index = config.active_mapping_profile_index(self._bindings)
+                active_name = self._get_mapping_profile_names()[active_index]
+                if self._ensure_mapping_bridge_running():
+                    self._set_status_message(
+                        f"已删除「{deleted_name}」，当前切换到「{active_name}」；桥接正在运行。"
+                    )
+
+        @Slot(result=bool)
+        def ensureBridgeRunning(self) -> bool:
+            if self._selected_device_id() != device_catalog.RC003_ID:
+                self._set_error_message("当前设备不是 RC003，不需要启动遥控器桥接。")
+                return False
+            self._set_error_message("")
+            if self._ensure_mapping_bridge_running():
+                self._set_status_message("桥接已启动，长按、双击和普通按键现在可以生效。")
+                return True
+            return False
+
+        @Slot(str, str, bool)
+        def addTextMenuItem(self, label: str, text: str, enabled: bool) -> None:
+            if config.is_system_mapping_profile(self._bindings):
+                self._set_error_message("系统默认方案为只读，快捷文本不能修改。")
+                return
+            if len(self._text_menu_items) >= key_mapping.MAX_TEXT_MENU_ITEMS:
+                self._set_error_message(
+                    f"文本菜单最多允许 {key_mapping.MAX_TEXT_MENU_ITEMS} 项。"
+                )
+                return
+            try:
+                item = key_mapping.TextMenuItem.from_dict(
+                    {"label": label, "text": text, "enabled": enabled}
+                )
+            except (TypeError, ValueError) as exc:
+                self._set_error_message(f"文本菜单项目无效：{exc}")
+                return
+            self._text_menu_items.append(item.to_dict())
+            self._set_error_message("")
+            self.textMenuItemsChanged.emit()
+
+        @Slot(int, str, str, bool)
+        def updateTextMenuItem(
+            self, row: int, label: str, text: str, enabled: bool
+        ) -> None:
+            if config.is_system_mapping_profile(self._bindings):
+                self._set_error_message("系统默认方案为只读，快捷文本不能修改。")
+                return
+            if not (0 <= row < len(self._text_menu_items)):
+                return
+            try:
+                item = key_mapping.TextMenuItem.from_dict(
+                    {"label": label, "text": text, "enabled": enabled}
+                )
+            except (TypeError, ValueError) as exc:
+                self._set_error_message(f"文本菜单项目无效：{exc}")
+                return
+            self._text_menu_items[row] = item.to_dict()
+            self._set_error_message("")
+            self.textMenuItemsChanged.emit()
+
+        @Slot(int)
+        def removeTextMenuItem(self, row: int) -> None:
+            if config.is_system_mapping_profile(self._bindings):
+                self._set_error_message("系统默认方案为只读，快捷文本不能修改。")
+                return
+            if 0 <= row < len(self._text_menu_items):
+                self._text_menu_items.pop(row)
+                self.textMenuItemsChanged.emit()
+
+        @Slot(int, int)
+        def moveTextMenuItem(self, row: int, delta: int) -> None:
+            if config.is_system_mapping_profile(self._bindings):
+                self._set_error_message("系统默认方案为只读，快捷文本不能修改。")
+                return
+            target = row + delta
+            if not (
+                0 <= row < len(self._text_menu_items)
+                and 0 <= target < len(self._text_menu_items)
+            ):
+                return
+            item = self._text_menu_items.pop(row)
+            self._text_menu_items.insert(target, item)
+            self.textMenuItemsChanged.emit()
+
+        @Slot()
         def startKeyDetection(self) -> None:
             """Listen for one real RC003 press without executing its action."""
 
@@ -1138,6 +1725,17 @@ def _load_qt_classes() -> dict:
             if self._selected_device_id() != device_catalog.RC003_ID:
                 self._set_key_detection_text("当前设备不是 RC003，无法检测遥控器按键。")
                 return
+            listener = None
+            relay_listener = None
+            errors = []
+            try:
+                relay_listener = button_detection_relay.ButtonDetectionListener(
+                    self._on_relay_button_event
+                )
+                relay_listener.start()
+            except Exception as exc:  # noqa: BLE001 - Raw Input may still work
+                relay_listener = None
+                errors.append(f"桥接检测通道：{exc}")
             try:
                 paths = raw_input_windows.enumerate_matching_device_paths()
                 device_path = raw_input_windows.hid_identity.select_single_device_path(paths)
@@ -1151,18 +1749,25 @@ def _load_qt_classes() -> dict:
                 if callable(set_physical_bindings):
                     set_physical_bindings(self._bindings.get("physical_bindings", {}))
                 listener.start(device_path)
-            except Exception as exc:  # noqa: BLE001 - surface failure in the UI
+            except Exception as exc:  # noqa: BLE001 - relay may still work
+                listener = None
+                errors.append(f"Raw Input：{exc}")
+            if listener is None and relay_listener is None:
                 self._key_detection_listener = None
+                self._key_detection_relay_listener = None
                 self._key_detection_active = False
                 self.keyDetectionActiveChanged.emit()
-                self._set_key_detection_text(f"无法启动真实按键检测：{exc}")
+                self._set_key_detection_text(
+                    "无法启动真实按键检测：" + "；".join(errors)
+                )
                 return
 
             self._key_detection_listener = listener
+            self._key_detection_relay_listener = relay_listener
             self._key_detection_active = True
             self.keyDetectionActiveChanged.emit()
             self._set_key_detection_text(
-                "正在监听 RC003。请现在按一次遥控器按键；不会执行该键的映射动作。"
+                "正在监听 RC003。请现在按一次遥控器按键；检测页只会选中对应按键。"
             )
 
         @Slot()
@@ -1204,6 +1809,13 @@ def _load_qt_classes() -> dict:
                     listener.stop()
                 except Exception as exc:  # noqa: BLE001 - report, do not crash Qt
                     self._set_key_detection_text(f"停止真实按键检测时出错：{exc}")
+            relay_listener = self._key_detection_relay_listener
+            self._key_detection_relay_listener = None
+            if relay_listener is not None:
+                try:
+                    relay_listener.stop()
+                except Exception as exc:  # noqa: BLE001 - report, do not crash Qt
+                    self._set_key_detection_text(f"停止桥接按键检测时出错：{exc}")
             if self._key_detection_active:
                 self._key_detection_active = False
                 self.keyDetectionActiveChanged.emit()
@@ -1211,7 +1823,7 @@ def _load_qt_classes() -> dict:
         @Slot()
         def saveAndLaunch(self) -> None:
             """Saves first (using the exact same validation as
-            "保存并应用"), and only launches the bridge if that save
+            the ordinary settings persistence path), and only launches the bridge if that save
             actually succeeded - a rejected mapping/hotkey must never be
             silently followed by starting the bridge with stale config
             anyway (unchanged XRBM-029 contract, now driven from QML).
@@ -1224,18 +1836,30 @@ def _load_qt_classes() -> dict:
                     "DJI Mic 2 使用 Windows 系统录音输入，不启动 RC003 BLE/HID/ATVV 桥。"
                 )
                 return
-            self._set_launch_status("正在启动…")
-            result = bridge_launcher.launch_bridge()
+            was_running = self._bridge_running
+            self._set_launch_status("正在保存并重启桥接…" if was_running else "正在启动桥接…")
+            if was_running:
+                result = bridge_launcher.restart_bridge()
+            else:
+                result = bridge_launcher.launch_bridge()
             self._set_launch_status(settings_ui.describe_launch_result(result))
+            self.refreshBridgeStatus()
 
         @Slot()
-        def restoreDefaults(self) -> None:
-            """Resets every widget's DISPLAYED value to the defaults - never
-            writes to config.json/key_bindings.json itself (XRBM-030 RETRY 1
-            blocker 4: this must never look/claim to be persisted). The
-            status message says so explicitly, so a user who restores
-            defaults and then simply closes the window without saving is
-            not misled into thinking anything was written to disk.
+        def refreshBridgeStatus(self) -> None:
+            try:
+                running = bridge_launcher.is_bridge_running()
+            except Exception:  # noqa: BLE001 - a read-only UI refresh must never crash Qt
+                return
+            self._set_bridge_running(running)
+
+        @Slot()
+        def restoreMappingDefaults(self) -> None:
+            """Resets only displayed button mappings, without persisting.
+
+            Voice trigger mode and hotkey are intentionally preserved: they
+            are connection/voice settings, and resetting a key map must not
+            silently break a working Typeless setup.
             """
 
             defaults = settings_ui.default_display_state()
@@ -1243,16 +1867,13 @@ def _load_qt_classes() -> dict:
                 defaults.button_display_map,
                 defaults.secondary_display_map,
             )
-            self._set_hotkey_text(defaults.hotkey_text)
-            trigger_mode = next(
-                mode
-                for mode in self._TRIGGER_MODE_ORDER
-                if settings_ui._TRIGGER_MODE_LABELS[mode] == defaults.trigger_mode_label
-            )
-            self._set_trigger_mode_index(self._TRIGGER_MODE_ORDER.index(trigger_mode))
+            self._text_menu_items = [
+                item.to_dict() for item in key_mapping.default_text_menu_items()
+            ]
+            self.textMenuItemsChanged.emit()
             self._set_error_message("")
             self._set_status_message(
-                "已恢复默认显示，尚未保存——点击「保存映射」或「保存并应用」才会写入设置。"
+                "已恢复默认按键映射，尚未保存——点击「保存映射」才会写入设置。"
             )
 
         @Slot()
@@ -1644,7 +2265,7 @@ def _load_qt_classes() -> dict:
                 )
                 return False
 
-            self._set_driver_status(f"已选择 {endpoint.name} 作为语音输出设备并保存。")
+            self._set_driver_status(f"已选择 {endpoint.name} 作为桥接端点并保存。")
             return True
 
         @Slot()

@@ -67,13 +67,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import single_instance
+from . import bridge_control_windows, single_instance
 
 # Reused, not redefined - see module docstring's ALREADY_RUNNING note.
 ALREADY_RUNNING_EXIT_CODE = single_instance.DUPLICATE_INSTANCE_EXIT_CODE
 
 DEFAULT_GRACE_CHECKS = 10
 DEFAULT_POLL_INTERVAL_SECONDS = 0.15
+DEFAULT_STOP_CHECKS = 100
+DEFAULT_STOP_POLL_INTERVAL_SECONDS = 0.1
 
 
 class BridgeLaunchConfigurationError(Exception):
@@ -195,3 +197,54 @@ def launch_bridge(
         pid=pid,
         exit_code=exit_code,
     )
+
+
+def is_bridge_running() -> bool:
+    """Read-only status used by the settings button's dynamic label."""
+
+    return bridge_control_windows.is_bridge_running()
+
+
+def restart_bridge(
+    command: Optional[Sequence[str]] = None,
+    *,
+    stop_checks: int = DEFAULT_STOP_CHECKS,
+    stop_poll_interval_seconds: float = DEFAULT_STOP_POLL_INTERVAL_SECONDS,
+    _is_running: Callable[[], bool] = bridge_control_windows.is_bridge_running,
+    _request_stop: Callable[[], bool] = bridge_control_windows.request_bridge_stop,
+    _launch: Callable[..., LaunchResult] = launch_bridge,
+    _sleep: Callable[[float], None] = time.sleep,
+) -> LaunchResult:
+    """Gracefully stops the old bridge, confirms cleanup, then launches.
+
+    A stop timeout or control-channel error is returned as ``LAUNCH_FAILED``;
+    in either case no replacement process is started, preventing two owners
+    from racing BLE/HID/audio resources.
+    """
+
+    resolved_command = tuple(command) if command is not None else tuple(build_launch_command())
+    try:
+        if _is_running():
+            if not _request_stop():
+                return LaunchResult(
+                    LaunchOutcome.LAUNCH_FAILED,
+                    resolved_command,
+                    error="桥接在停止请求发送前已消失，请重试。",
+                )
+            for _ in range(stop_checks):
+                _sleep(stop_poll_interval_seconds)
+                if not _is_running():
+                    break
+            else:
+                return LaunchResult(
+                    LaunchOutcome.LAUNCH_FAILED,
+                    resolved_command,
+                    error="等待旧桥接释放 BLE/HID/音频资源超时，未启动新实例。",
+                )
+    except bridge_control_windows.BridgeControlUnavailableError as exc:
+        return LaunchResult(
+            LaunchOutcome.LAUNCH_FAILED,
+            resolved_command,
+            error=f"无法控制现有桥接：{exc}",
+        )
+    return _launch(resolved_command)

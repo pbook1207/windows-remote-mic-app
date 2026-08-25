@@ -85,6 +85,92 @@ class ButtonActionSerializationTests(unittest.TestCase):
                 key_mapping.ButtonAction.from_dict(action.to_dict()), action
             )
 
+    def test_custom_text_action_round_trips_and_never_repeats(self):
+        action = key_mapping.ButtonAction(
+            key_mapping.ActionKind.TYPE_TEXT,
+            text="继续处理 ✅",
+        )
+
+        self.assertEqual(key_mapping.ButtonAction.from_dict(action.to_dict()), action)
+        self.assertFalse(key_mapping.action_allows_repeat(action))
+
+    def test_custom_text_submit_rejects_empty_multiline_and_oversized_payloads(self):
+        invalid_payloads = (
+            "",
+            "第一行\n第二行",
+            "x" * (key_mapping.MAX_TEXT_SUBMIT_LENGTH + 1),
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload_length=len(payload)):
+                with self.assertRaises(ValueError):
+                    key_mapping.ButtonAction.from_dict(
+                        {
+                            "kind": "type_text",
+                            "keys": [],
+                            "text": payload,
+                        }
+                    )
+
+    def test_fixed_execute_prototype_binding_still_loads(self):
+        action = key_mapping.ButtonAction.from_dict(
+            {"kind": "type_execute_and_submit", "keys": []}
+        )
+
+        self.assertEqual(
+            action.kind, key_mapping.ActionKind.TYPE_EXECUTE_AND_SUBMIT
+        )
+        self.assertFalse(key_mapping.action_allows_repeat(action))
+
+    def test_text_menu_items_validate_labels_text_and_enabled_state(self):
+        items = key_mapping.normalize_text_menu_items(
+            [
+                {"label": "总结", "text": "请总结上述内容", "enabled": True},
+                {"label": "", "text": "继续", "enabled": False},
+            ]
+        )
+
+        self.assertEqual(items[0].label, "总结")
+        self.assertEqual(items[1].label, "继续")
+        self.assertFalse(items[1].enabled)
+
+    def test_text_menu_rejects_too_many_items(self):
+        with self.assertRaises(ValueError):
+            key_mapping.normalize_text_menu_items(
+                [
+                    {"label": str(index), "text": "内容", "enabled": True}
+                    for index in range(key_mapping.MAX_TEXT_MENU_ITEMS + 1)
+                ]
+            )
+
+    def test_vibe_coding_navigation_actions_round_trip_and_repeat_safely(self):
+        repeatable = {
+            key_mapping.ActionKind.SCROLL_UP,
+            key_mapping.ActionKind.SCROLL_DOWN,
+            key_mapping.ActionKind.PAGE_UP,
+            key_mapping.ActionKind.PAGE_DOWN,
+        }
+        one_shot = {
+            key_mapping.ActionKind.VIRTUAL_DESKTOP_LEFT,
+            key_mapping.ActionKind.VIRTUAL_DESKTOP_RIGHT,
+            key_mapping.ActionKind.TASK_VIEW,
+            key_mapping.ActionKind.CLIPBOARD_HISTORY,
+            key_mapping.ActionKind.PREVIOUS_TAB,
+            key_mapping.ActionKind.NEXT_TAB,
+            key_mapping.ActionKind.BROWSER_BACK,
+            key_mapping.ActionKind.BROWSER_FORWARD,
+            key_mapping.ActionKind.SNAP_WINDOW_LEFT,
+            key_mapping.ActionKind.SNAP_WINDOW_RIGHT,
+            key_mapping.ActionKind.MAXIMIZE_WINDOW,
+            key_mapping.ActionKind.RESTORE_MINIMIZE_WINDOW,
+        }
+        for action_kind in repeatable | one_shot:
+            with self.subTest(action_kind=action_kind):
+                action = key_mapping.ButtonAction(action_kind)
+                self.assertEqual(key_mapping.ButtonAction.from_dict(action.to_dict()), action)
+                self.assertEqual(
+                    key_mapping.action_allows_repeat(action), action_kind in repeatable
+                )
+
 
 class GestureBindingLookupTests(unittest.TestCase):
     def test_legacy_flat_binding_is_single_click_only(self):

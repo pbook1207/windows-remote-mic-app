@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote-mic-rc003"
-version = "0.1.0"
+version = "0.1.0.dev31+hidtapfix"
 description = "Remote Mic - Xiaomi RC003 Windows client (source/build candidate, not yet real-device verified)"
 readme = "README.md"
 requires-python = ">=3.10"

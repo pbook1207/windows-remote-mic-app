@@ -1094,7 +1094,7 @@ def check_output_endpoint_resolution(
     except audio_output.AudioOutputUnavailableError as exc:
         return CheckResult(
             "output_endpoint",
-            "语音输出端点",
+            "桥接端点",
             CheckGroup.VOICE_BRIDGE,
             CheckStatus.UNSUPPORTED,
             f"无法枚举播放端点：{exc}",
@@ -1107,7 +1107,7 @@ def check_output_endpoint_resolution(
     except audio_output.AudioOutputUnavailableError as exc:
         return CheckResult(
             "output_endpoint",
-            "语音输出端点",
+            "桥接端点",
             CheckGroup.VOICE_BRIDGE,
             CheckStatus.FAIL,
             str(exc),
@@ -1116,26 +1116,22 @@ def check_output_endpoint_resolution(
     if audio_output.is_cable_input_endpoint(endpoint.name):
         return CheckResult(
             "output_endpoint",
-            "语音输出端点",
+            "桥接端点",
             CheckGroup.VOICE_BRIDGE,
             CheckStatus.PASS,
             f"已选择端点 {endpoint.name!r} 存在，且为 CABLE Input（VB-CABLE 语音链路）。",
         )
-    # RETRY 1 (independent review): resolving to a real but non-CABLE-Input
-    # endpoint used to still return PASS here - a false green readiness
-    # signal for the bundled VB-CABLE workflow this page exists to support
-    # (taskbook line 77: "...points to CABLE Input when the bundled driver
-    # workflow is used"). This check exists specifically to gate that
-    # workflow's readiness, so anything other than CABLE Input is FAIL with
-    # actionable text, not a second, quieter kind of success.
+    # A user may deliberately bridge to another virtual sound card.  Windows
+    # exposes no reliable universal "virtual" endpoint flag, so this check
+    # proves the selected endpoint exists and leaves paired recording-endpoint
+    # confirmation to the explicit guidance in the connection page.
     return CheckResult(
         "output_endpoint",
-        "语音输出端点",
+        "桥接端点",
         CheckGroup.VOICE_BRIDGE,
-        CheckStatus.FAIL,
-        f"已选择端点 {endpoint.name!r} 存在，但不是 CABLE Input——如果计划使用"
-        "本页的 VB-CABLE 语音链路，需要在「检查与修复」页点击「选择检测到的 "
-        "CABLE Input 作为输出」，或在「连接」页手动改选 CABLE Input。",
+        CheckStatus.PASS,
+        f"已选择自定义桥接端点 {endpoint.name!r}，且该端点当前存在。请确认语音软件"
+        "选择了这张虚拟声卡对应的麦克风端点。",
     )
 
 
@@ -1242,7 +1238,7 @@ def run_diagnostics(
         ),
         (
             "output_endpoint",
-            "语音输出端点",
+            "桥接端点",
             CheckGroup.VOICE_BRIDGE,
             lambda: check_output_endpoint_resolution(saved_output_name, saved_output_host_api),
         ),

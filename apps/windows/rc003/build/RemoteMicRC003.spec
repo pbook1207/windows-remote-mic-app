@@ -80,14 +80,21 @@ for frida_asset in FRIDA_ASSET_DIR.glob("*.xz"):
 
 hiddenimports = [
     "ovb_rc003.app",
+    "ovb_rc003.autostart_windows",  # opt-in per-user Startup Apps setting
+    "ovb_rc003.button_detection_relay",
+    "ovb_rc003.bridge_control_windows",
     "ovb_rc003.device_catalog",  # XRBM-036: multi-device settings/runtime gate
     "ovb_rc003.settings_ui",
     "ovb_rc003.qt_settings_app",  # XRBM-030
+    "ovb_rc003.text_menu_overlay",  # Qt Quick no-focus text menu helper
+    "ovb_rc003.uia_caret_windows",  # modern Chromium/WebView caret location
     "ovb_rc003.windows_diagnostics",  # XRBM-031
     "ovb_rc003.vb_cable_bundle",  # XRBM-031
     "ovb_rc003.ble_transport_winrt",
     "ovb_rc003.raw_input_windows",
     "ovb_rc003.audio_playback",
+    "ovb_rc003.audio_capture_activity_windows",
+    "ovb_rc003.unified_audio_router",  # opt-in system mic / RC003 priority router
     "ovb_rc003.win32_input",
     "ovb_rc003.connection_supervisor",
     "ovb_rc003.doubao_rpc",
@@ -103,6 +110,12 @@ hiddenimports = [
     # PyInstaller's static analysis cannot always auto-detect:
     "sounddevice",
     "numpy",
+    "pycaw",
+    "pycaw.utils",
+    "pycaw.api.audiopolicy",
+    "pycaw.api.mmdeviceapi",
+    "comtypes",
+    "psutil",
     "winrt.windows.devices.bluetooth",
     "winrt.windows.devices.bluetooth.genericattributeprofile",
     "winrt.windows.devices.enumeration",

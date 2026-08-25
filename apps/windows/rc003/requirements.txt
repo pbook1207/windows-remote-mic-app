@@ -9,6 +9,13 @@
 sounddevice==0.5.5
 numpy==2.4.3
 
+# Windows Core Audio session inspection for on-demand unified input. These
+# pure-Python libraries are bundled into the portable build; users do not
+# install a separate audio program or driver.
+pycaw==20251023
+comtypes==1.4.16
+psutil==7.2.2
+
 # Qt Quick/QML settings window (XRBM-030), replacing the earlier Tk view.
 # PySide6-Essentials is the official Qt-for-Python distribution split that
 # excludes the (separately packaged, heavier) PySide6-Addons modules this

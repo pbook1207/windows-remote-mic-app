@@ -60,3 +60,14 @@ VB-CABLE as the Windows default device. Audio is written only to the endpoint ex
 official package only as an explicit build step. At runtime, installation is
 available only after an explicit user click and a real Windows UAC prompt; the
 Remote Mic process never runs with administrator privileges and never reports a driver install as successful merely because a process was launched.
+
+## pycaw, comtypes, and psutil
+
+- `pycaw` 20251023 — <https://github.com/AndreMiras/pycaw> — MIT License
+- `comtypes` 1.4.16 — <https://github.com/enthought/comtypes> — MIT License
+- `psutil` 7.2.2 — <https://github.com/giampaolo/psutil> — BSD-3-Clause
+
+The Windows client bundles these Python libraries to inspect whether the
+existing VB-CABLE `CABLE Output` recording endpoint has an active Core Audio
+consumer. This inspection does not install a driver or open a microphone; it
+allows Remote Mic to release the physical system microphone while idle.

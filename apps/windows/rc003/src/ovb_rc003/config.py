@@ -19,9 +19,11 @@ top-level ``address`` key (see XRBM-014 review RETRY P1 #6).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -32,6 +34,13 @@ CONFIG_FILENAME = "config.json"
 KEY_BINDINGS_FILENAME = "key_bindings.json"
 
 SCHEMA_VERSION = 1
+SYSTEM_MAPPING_PROFILE_ID = "system_default"
+SYSTEM_MAPPING_PROFILE_NAME = "系统默认方案"
+LEGACY_MAPPING_PROFILE_ID = "default"
+LEGACY_MAPPING_PROFILE_NAME = "默认方案"
+MIGRATED_MAPPING_PROFILE_NAME = "原有配置"
+MAX_MAPPING_PROFILES = 20
+MAX_MAPPING_PROFILE_NAME_LENGTH = 40
 
 # Any config key matching one of these names is refused at save time,
 # regardless of which file it would land in.
@@ -51,6 +60,10 @@ FORBIDDEN_KEYS = frozenset(
 
 class ConfigPrivacyError(Exception):
     """Raised when code attempts to persist a forbidden identity field."""
+
+
+class MappingProfileError(ValueError):
+    """Raised when a named button-mapping profile operation is invalid."""
 
 
 def config_root() -> Path:
@@ -93,6 +106,15 @@ def default_config() -> Dict[str, Any]:
         # Windows WASAPI and MME) - name alone is not always unique.
         "output_endpoint_name": "",
         "output_endpoint_host_api": "",
+        # Opt-in only. When False the bridge never opens/captures a Windows
+        # recording endpoint and retains the legacy RC003-only behavior.
+        "unified_virtual_input_enabled": False,
+        # When unified input is enabled, release the physical system mic
+        # while no application actively reads CABLE Output.  This preserves
+        # the stable virtual endpoint while avoiding an idle privacy icon.
+        "unified_on_demand_enabled": True,
+        "system_input_endpoint_name": "",
+        "system_input_endpoint_host_api": "",
     }
 
 
@@ -144,72 +166,46 @@ def save_config(path: Path, config: Dict[str, Any]) -> None:
 
 
 def _normalize_voice_hotkey(config: Dict[str, Any]) -> None:
-    """Keep the two built-in voice modes paired with their real shortcuts.
+    """Normalize spelling without coupling gesture and shortcut.
 
-    Legacy built-in values are repaired, and a recorded built-in chord also
-    restores its required mode if the UI previously saved the two fields out
-    of sync. A user-supplied shortcut such as ``win+h`` remains untouched.
+    The trigger mode decides whether the selected host shortcut is tapped or
+    held; ``voice_hotkey`` decides which chord is sent.  They are intentionally
+    independent so a future Typeless shortcut (or a user's custom shortcut)
+    is never overwritten merely by selecting a sending mode.  Historical
+    values are no longer inferred or repaired here: after many shipped
+    migration builds, preserving an explicit user value is now the safer and
+    more predictable contract.
     """
 
     current = str(config.get("voice_hotkey", "")).strip().lower()
-    from . import key_mapping
-
-    # The former HOLD preset was Ctrl+Win. It is a shipped built-in, not a
-    # user customization: migrate it to the right-Alt physical bridge and
-    # repair the mode even if the two old fields were saved out of sync.
-    if current in {"lctrl+win", "lctrl+lwin"}:
-        config["voice_trigger_mode"] = key_mapping.VoiceTriggerMode.HOLD.value
-        config["voice_hotkey"] = key_mapping.voice_hotkey_for_trigger_mode(
-            key_mapping.VoiceTriggerMode.HOLD
-        )
-        return
-
-    try:
-        mode = key_mapping.VoiceTriggerMode(config.get("voice_trigger_mode"))
-    except ValueError:
-        mode = None
-
-    # ``lalt`` was an invalid recording of the RC003 F5 leak. Repair it only
-    # for the built-in HOLD mode; arbitrary user shortcuts remain untouched.
-    if mode == key_mapping.VoiceTriggerMode.HOLD and current == "lalt":
-        config["voice_hotkey"] = key_mapping.voice_hotkey_for_trigger_mode(mode)
-        return
-
-    if current not in key_mapping.LEGACY_VOICE_HOTKEYS:
-        inferred_mode = key_mapping.voice_trigger_mode_for_hotkey(current)
-        if inferred_mode is not None:
-            config["voice_trigger_mode"] = inferred_mode.value
-        return
-
-    if mode is None:
-        return
-    config["voice_hotkey"] = key_mapping.voice_hotkey_for_trigger_mode(mode)
+    if current:
+        config["voice_hotkey"] = current
 
 
 def default_key_bindings() -> Dict[str, Any]:
-    # Imported lazily to avoid a hard import-order dependency between the two
-    # modules at package-load time.
-    from . import key_mapping
-
-    return {
+    snapshot = _factory_mapping_profile_snapshot()
+    document = {
         "schema_version": SCHEMA_VERSION,
-        "bindings": {
-            button_id: action.to_dict()
-            for button_id, action in key_mapping.default_button_actions().items()
-        },
-        # Secondary gestures follow the reference project's separate map.
-        # Keeping the primary action flat preserves compatibility with all
-        # existing Windows config files.
-        "secondary_bindings": {},
+        **copy.deepcopy(snapshot),
         # Physical signatures are learned from Raw Input captures. They are
         # deliberately independent of semantic actions and contain no device
         # path or Bluetooth identity.
         "physical_bindings": {},
     }
+    document["active_mapping_profile_id"] = SYSTEM_MAPPING_PROFILE_ID
+    document["mapping_profiles"] = [
+        {
+            "id": SYSTEM_MAPPING_PROFILE_ID,
+            "name": SYSTEM_MAPPING_PROFILE_NAME,
+            **copy.deepcopy(snapshot),
+        }
+    ]
+    return document
 
 
 def load_key_bindings(path: Path) -> Dict[str, Any]:
     bindings = default_key_bindings()
+    stored: Dict[str, Any] = {}
     if path.is_file():
         with path.open("r", encoding="utf-8-sig") as handle:
             stored = json.load(handle)
@@ -232,9 +228,290 @@ def load_key_bindings(path: Path) -> Dict[str, Any]:
         bindings["secondary_bindings"] = {}
     _normalize_physical_bindings(bindings)
     _normalize_semantic_actions(bindings)
+    _normalize_text_menu_items(bindings)
     _normalize_mic_binding(bindings)
     _normalize_secondary_bindings(bindings)
+    _normalize_mapping_profiles(
+        bindings,
+        migrate_legacy_top_level="mapping_profiles" not in stored,
+    )
     return bindings
+
+
+def normalize_mapping_profile_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise MappingProfileError("方案名称必须是文本")
+    name = value.strip()
+    if not name:
+        raise MappingProfileError("方案名称不能为空")
+    if any(character in name for character in ("\r", "\n", "\x00")):
+        raise MappingProfileError("方案名称只能使用一行文字")
+    if len(name) > MAX_MAPPING_PROFILE_NAME_LENGTH:
+        raise MappingProfileError(
+            f"方案名称不能超过 {MAX_MAPPING_PROFILE_NAME_LENGTH} 个字符"
+        )
+    return name
+
+
+def _mapping_profile_snapshot(bindings: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "bindings": copy.deepcopy(bindings.get("bindings", {})),
+        "secondary_bindings": copy.deepcopy(
+            bindings.get("secondary_bindings", {})
+        ),
+        "text_menu_items": copy.deepcopy(bindings.get("text_menu_items", [])),
+    }
+
+
+def _factory_mapping_profile_snapshot() -> Dict[str, Any]:
+    """Return the immutable built-in mapping and quick-text template."""
+
+    from . import key_mapping
+
+    return {
+        "bindings": {
+            button_id: action.to_dict()
+            for button_id, action in key_mapping.default_button_actions().items()
+        },
+        "secondary_bindings": {},
+        "text_menu_items": [
+            item.to_dict() for item in key_mapping.default_text_menu_items()
+        ],
+    }
+
+
+def _normalize_profile_snapshot(raw_profile: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = {
+        "bindings": copy.deepcopy(raw_profile.get("bindings", {})),
+        "secondary_bindings": copy.deepcopy(
+            raw_profile.get("secondary_bindings", {})
+        ),
+        "text_menu_items": copy.deepcopy(raw_profile.get("text_menu_items", [])),
+    }
+    if not isinstance(snapshot["bindings"], dict):
+        snapshot["bindings"] = {}
+    if not isinstance(snapshot["secondary_bindings"], dict):
+        snapshot["secondary_bindings"] = {}
+    _normalize_semantic_actions(snapshot)
+    _normalize_text_menu_items(snapshot)
+    _normalize_mic_binding(snapshot)
+    _normalize_secondary_bindings(snapshot)
+    return snapshot
+
+
+def _normalize_mapping_profiles(
+    bindings: Dict[str, Any], *, migrate_legacy_top_level: bool = False,
+    sync_active_from_top_level: bool = True,
+) -> None:
+    """Inject the read-only system template and preserve every user profile."""
+
+    factory_snapshot = _normalize_profile_snapshot(
+        _factory_mapping_profile_snapshot()
+    )
+    normalized = [
+        {
+            "id": SYSTEM_MAPPING_PROFILE_ID,
+            "name": SYSTEM_MAPPING_PROFILE_NAME,
+            **copy.deepcopy(factory_snapshot),
+        }
+    ]
+    used_ids = {SYSTEM_MAPPING_PROFILE_ID}
+    used_names = {SYSTEM_MAPPING_PROFILE_NAME.casefold()}
+    requested_active_id = str(
+        bindings.get("active_mapping_profile_id", "")
+    ).strip()
+
+    def unique_name(preferred: str) -> str:
+        candidate = preferred
+        suffix = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{preferred} {suffix}"
+            suffix += 1
+        return candidate
+
+    if migrate_legacy_top_level:
+        legacy_snapshot = _normalize_profile_snapshot(bindings)
+        if legacy_snapshot != factory_snapshot:
+            legacy_name = unique_name(MIGRATED_MAPPING_PROFILE_NAME)
+            normalized.append(
+                {
+                    "id": "legacy_default",
+                    "name": legacy_name,
+                    **legacy_snapshot,
+                }
+            )
+            used_ids.add("legacy_default")
+            used_names.add(legacy_name.casefold())
+            requested_active_id = "legacy_default"
+        else:
+            requested_active_id = SYSTEM_MAPPING_PROFILE_ID
+    else:
+        raw_profiles = bindings.get("mapping_profiles")
+        if isinstance(raw_profiles, list):
+            for raw in raw_profiles:
+                if len(normalized) >= MAX_MAPPING_PROFILES:
+                    break
+                if not isinstance(raw, dict):
+                    continue
+                profile_id = str(raw.get("id", "")).strip()
+                if profile_id == SYSTEM_MAPPING_PROFILE_ID:
+                    # Never trust persisted edits to the built-in template.
+                    continue
+                try:
+                    name = normalize_mapping_profile_name(raw.get("name", ""))
+                except MappingProfileError:
+                    continue
+                snapshot = _normalize_profile_snapshot(raw)
+                if (
+                    profile_id == LEGACY_MAPPING_PROFILE_ID
+                    and snapshot == factory_snapshot
+                ):
+                    if requested_active_id == LEGACY_MAPPING_PROFILE_ID:
+                        requested_active_id = SYSTEM_MAPPING_PROFILE_ID
+                    continue
+                if (
+                    profile_id == LEGACY_MAPPING_PROFILE_ID
+                    and name == LEGACY_MAPPING_PROFILE_NAME
+                ):
+                    name = unique_name(MIGRATED_MAPPING_PROFILE_NAME)
+                elif name.casefold() in used_names:
+                    # A user could already have chosen the now-reserved
+                    # system name in .23. Preserve the profile under a
+                    # unique visible name instead of dropping its contents.
+                    name = unique_name(name)
+                if (
+                    not profile_id
+                    or len(profile_id) > 80
+                    or profile_id in used_ids
+                ):
+                    continue
+                normalized.append(
+                    {"id": profile_id, "name": name, **snapshot}
+                )
+                used_ids.add(profile_id)
+                used_names.add(name.casefold())
+
+    active_id = requested_active_id
+    if active_id not in {profile["id"] for profile in normalized}:
+        active_id = SYSTEM_MAPPING_PROFILE_ID
+    if active_id == SYSTEM_MAPPING_PROFILE_ID:
+        # The system scheme is a genuine immutable source of truth. Manual
+        # JSON edits to its top-level hot-reload surface are discarded.
+        bindings.update(copy.deepcopy(factory_snapshot))
+    elif sync_active_from_top_level:
+        # User profiles retain the bridge's flat top-level hot-reload shape.
+        active_snapshot = _normalize_profile_snapshot(bindings)
+        for profile in normalized:
+            if profile["id"] == active_id:
+                profile.update(active_snapshot)
+                break
+    bindings["mapping_profiles"] = normalized
+    bindings["active_mapping_profile_id"] = active_id
+
+
+def mapping_profile_summaries(bindings: Dict[str, Any]) -> List[Dict[str, str]]:
+    document = copy.deepcopy(bindings)
+    _normalize_mapping_profiles(document)
+    return [
+        {"id": profile["id"], "name": profile["name"]}
+        for profile in document["mapping_profiles"]
+    ]
+
+
+def active_mapping_profile_index(bindings: Dict[str, Any]) -> int:
+    active_id = str(bindings.get("active_mapping_profile_id", ""))
+    profiles = mapping_profile_summaries(bindings)
+    for index, profile in enumerate(profiles):
+        if profile["id"] == active_id:
+            return index
+    return 0
+
+
+def is_system_mapping_profile(bindings: Dict[str, Any]) -> bool:
+    return (
+        str(bindings.get("active_mapping_profile_id", ""))
+        == SYSTEM_MAPPING_PROFILE_ID
+    )
+
+
+def update_active_mapping_profile(bindings: Dict[str, Any]) -> Dict[str, Any]:
+    document = copy.deepcopy(bindings)
+    _normalize_mapping_profiles(document)
+    return document
+
+
+def create_mapping_profile(bindings: Dict[str, Any], name: str) -> Dict[str, Any]:
+    # "Save As" must copy the visible top-level mapping into the new profile
+    # without also overwriting the previously active profile.  This makes
+    # editing a profile, then choosing "另存为", behave like users expect.
+    document = copy.deepcopy(bindings)
+    _normalize_mapping_profiles(document, sync_active_from_top_level=False)
+    normalized_name = normalize_mapping_profile_name(name)
+    profiles = document["mapping_profiles"]
+    if len(profiles) >= MAX_MAPPING_PROFILES:
+        raise MappingProfileError(f"最多只能保存 {MAX_MAPPING_PROFILES} 个方案")
+    if any(profile["name"].casefold() == normalized_name.casefold() for profile in profiles):
+        raise MappingProfileError("已经存在同名方案")
+    profile_id = "profile_" + uuid.uuid4().hex
+    profiles.append(
+        {
+            "id": profile_id,
+            "name": normalized_name,
+            **_mapping_profile_snapshot(document),
+        }
+    )
+    document["active_mapping_profile_id"] = profile_id
+    return document
+
+
+def activate_mapping_profile(bindings: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
+    document = update_active_mapping_profile(bindings)
+    target = next(
+        (profile for profile in document["mapping_profiles"] if profile["id"] == profile_id),
+        None,
+    )
+    if target is None:
+        raise MappingProfileError("找不到要切换的配置方案")
+    document.update(_mapping_profile_snapshot(target))
+    document["active_mapping_profile_id"] = target["id"]
+    return document
+
+
+def rename_mapping_profile(
+    bindings: Dict[str, Any], profile_id: str, name: str
+) -> Dict[str, Any]:
+    if profile_id == SYSTEM_MAPPING_PROFILE_ID:
+        raise MappingProfileError("系统默认方案不能重命名")
+    document = update_active_mapping_profile(bindings)
+    normalized_name = normalize_mapping_profile_name(name)
+    profiles = document["mapping_profiles"]
+    if any(
+        profile["id"] != profile_id
+        and profile["name"].casefold() == normalized_name.casefold()
+        for profile in profiles
+    ):
+        raise MappingProfileError("已经存在同名方案")
+    target = next((profile for profile in profiles if profile["id"] == profile_id), None)
+    if target is None:
+        raise MappingProfileError("找不到要重命名的配置方案")
+    target["name"] = normalized_name
+    return document
+
+
+def delete_mapping_profile(bindings: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
+    if profile_id == SYSTEM_MAPPING_PROFILE_ID:
+        raise MappingProfileError("系统默认方案不能删除")
+    document = update_active_mapping_profile(bindings)
+    profiles = document["mapping_profiles"]
+    remaining = [profile for profile in profiles if profile["id"] != profile_id]
+    if len(remaining) == len(profiles):
+        raise MappingProfileError("找不到要删除的配置方案")
+    document["mapping_profiles"] = remaining
+    if document["active_mapping_profile_id"] == profile_id:
+        target = remaining[0]
+        document.update(_mapping_profile_snapshot(target))
+        document["active_mapping_profile_id"] = target["id"]
+    return document
 
 
 def _normalize_semantic_actions(bindings: Dict[str, Any]) -> None:
@@ -257,7 +534,19 @@ def _normalize_semantic_actions(bindings: Dict[str, Any]) -> None:
         except (KeyError, TypeError, ValueError):
             return raw
         migrated = key_mapping.semantic_action_for_keys(action.keys)
-        return migrated.to_dict() if migrated is not None else raw
+        if migrated is not None:
+            return migrated.to_dict()
+        if action.kind == key_mapping.ActionKind.TYPE_TEXT_AND_SUBMIT:
+            return key_mapping.ButtonAction(
+                key_mapping.ActionKind.TYPE_TEXT,
+                text=action.text,
+            ).to_dict()
+        if action.kind == key_mapping.ActionKind.TYPE_EXECUTE_AND_SUBMIT:
+            return key_mapping.ButtonAction(
+                key_mapping.ActionKind.TYPE_TEXT,
+                text="执行",
+            ).to_dict()
+        return raw
 
     primary = bindings.get("bindings")
     if isinstance(primary, dict):
@@ -292,6 +581,17 @@ def _normalize_mic_binding(bindings: Dict[str, Any]) -> None:
 
     button_bindings = bindings.setdefault("bindings", {})
     button_bindings["mic"] = key_mapping.ButtonAction(key_mapping.ActionKind.VOICE).to_dict()
+
+
+def _normalize_text_menu_items(bindings: Dict[str, Any]) -> None:
+    from . import key_mapping
+
+    raw_items = bindings.get("text_menu_items")
+    try:
+        items = key_mapping.normalize_text_menu_items(raw_items)
+    except (TypeError, ValueError):
+        items = key_mapping.default_text_menu_items()
+    bindings["text_menu_items"] = [item.to_dict() for item in items]
 
 
 def _normalize_secondary_bindings(bindings: Dict[str, Any]) -> None:

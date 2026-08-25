@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from . import (
     audio_output,
@@ -62,6 +62,23 @@ _REFERENCE_ACTION_LABELS: Dict[key_mapping.ActionKind, str] = {
     key_mapping.ActionKind.SYSTEM_VOLUME_DOWN: "系统音量 −",
     key_mapping.ActionKind.SYSTEM_VOLUME_MUTE: "系统静音",
     key_mapping.ActionKind.PLAY_PAUSE: "播放 / 暂停",
+    key_mapping.ActionKind.SCROLL_UP: "鼠标所在区域向上滚动",
+    key_mapping.ActionKind.SCROLL_DOWN: "鼠标所在区域向下滚动",
+    key_mapping.ActionKind.PAGE_UP: "当前页面向上翻页",
+    key_mapping.ActionKind.PAGE_DOWN: "当前页面向下翻页",
+    key_mapping.ActionKind.VIRTUAL_DESKTOP_LEFT: "切换到左侧虚拟桌面",
+    key_mapping.ActionKind.VIRTUAL_DESKTOP_RIGHT: "切换到右侧虚拟桌面",
+    key_mapping.ActionKind.TASK_VIEW: "打开任务视图",
+    key_mapping.ActionKind.CLIPBOARD_HISTORY: "打开剪贴板历史",
+    key_mapping.ActionKind.PREVIOUS_TAB: "上一个标签页",
+    key_mapping.ActionKind.NEXT_TAB: "下一个标签页",
+    key_mapping.ActionKind.BROWSER_BACK: "后退",
+    key_mapping.ActionKind.BROWSER_FORWARD: "前进",
+    key_mapping.ActionKind.SNAP_WINDOW_LEFT: "窗口贴靠左侧",
+    key_mapping.ActionKind.SNAP_WINDOW_RIGHT: "窗口贴靠右侧",
+    key_mapping.ActionKind.MAXIMIZE_WINDOW: "窗口最大化",
+    key_mapping.ActionKind.RESTORE_MINIMIZE_WINDOW: "窗口还原 / 最小化",
+    key_mapping.ActionKind.OPEN_TEXT_MENU: "打开文本菜单",
     key_mapping.ActionKind.OPEN_REMOTE_MIC: "打开无线麦",
     key_mapping.ActionKind.OPEN_CODEX: "打开 Codex",
     key_mapping.ActionKind.OPEN_CLAUDE: "打开 Claude",
@@ -82,19 +99,34 @@ _REFERENCE_ACTION_KINDS_BY_LABEL: Dict[str, key_mapping.ActionKind] = {
 # Preset choices shown in the mapping dropdown. Any other
 # "mod+mod+key" text is still accepted as a custom shortcut through
 # hotkey.HotkeySpec.parse.
+_ACTION_CATEGORY_PREFIX = "── "
 _PRESET_KEY_COMBOS = (
+    "── 常用输入 ──",
     "Escape", "Return", "Delete（退格）", "方向上", "方向下", "方向左", "方向右",
-    "显示桌面", "上下文菜单", "应用切换", "系统音量 +", "系统音量 −",
-    "系统静音", "播放 / 暂停",
+    "输入文本…", "打开文本菜单",
+    "── 滚动与导航 ──",
+    "鼠标所在区域向上滚动", "鼠标所在区域向下滚动",
+    "当前页面向上翻页", "当前页面向下翻页", "后退", "前进",
+    "上一个标签页", "下一个标签页",
+    "── Windows 工作区 ──",
+    "切换到左侧虚拟桌面", "切换到右侧虚拟桌面", "打开任务视图",
+    "打开剪贴板历史", "窗口贴靠左侧", "窗口贴靠右侧", "窗口最大化",
+    "窗口还原 / 最小化", "显示桌面", "上下文菜单", "应用切换",
+    "── 系统与媒体 ──",
+    "系统音量 +", "系统音量 −", "系统静音", "播放 / 暂停",
+    "── 应用 ──",
     "打开无线麦", "打开 Codex", "打开 Claude", "打开 cmux", "打开微信",
     "打开 Cursor", "打开 Slack", "打开企业微信", "打开网易云音乐",
     "打开 Chrome", "打开 Edge", "打开 Zed",
+    "── 自定义快捷键 ──",
     "lctrl+win", "ralt", "ralt+space", "tab", "space", "f5", "禁用",
 )
 
 _TRIGGER_MODE_LABELS = {
-    key_mapping.VoiceTriggerMode.TOGGLE: "免按住（右 Alt + 空格）",
-    key_mapping.VoiceTriggerMode.HOLD: "长按（右 Alt）",
+    key_mapping.VoiceTriggerMode.TYPELESS: "Typeless 专用（推荐）",
+    key_mapping.VoiceTriggerMode.TOGGLE: "点按快捷键（开始、结束各一次）",
+    key_mapping.VoiceTriggerMode.HOLD: "按住快捷键（说话期间保持按下）",
+    key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY: "Typeless 排障（只启动，不自动结束）",
 }
 
 def voice_hotkey_for_trigger_mode(trigger_mode: key_mapping.VoiceTriggerMode) -> str:
@@ -107,6 +139,12 @@ def voice_hotkey_for_trigger_mode(trigger_mode: key_mapping.VoiceTriggerMode) ->
 # back to ActionKind.VOICE - it must NOT be handed to HotkeySpec.parse.
 _VOICE_DISPLAY = "语音（使用专用组合键）"
 
+_TEXT_SUBMIT_PRESET = "输入文本…"
+_TEXT_SUBMIT_PREFIX = "输入文本："
+_LEGACY_EXECUTE_SUBMIT_DISPLAY = "输入“执行”并回车"
+_LEGACY_TEXT_SUBMIT_PRESET = "输入自定义文本并回车…"
+_LEGACY_TEXT_SUBMIT_PREFIX = "输入文本并回车："
+
 # Secondary gestures are optional.  Keep an explicit display value in the
 # editable ComboBox so Qt does not fall back to the first real preset (usually
 # ``escape``) when an older key_bindings.json has no secondary_bindings map.
@@ -115,7 +153,7 @@ SECONDARY_UNCONFIGURED_DISPLAY = "未设置"
 # The microphone button remains a VOICE lifecycle action (it cannot be changed
 # into an unrelated normal-key mapping), but the host chord it emits is
 # editable through SettingsController.hotkeyText in the same row.
-_MIC_ROW_DISPLAY = "触发语音（免按住：右 Alt+空格；长按：右 Alt）"
+_MIC_ROW_DISPLAY = "触发语音（豆包或 Typeless 专用模式）"
 
 # device_profile.ALL_BUTTON_IDS also carries "volume_mute", a HID usage-table
 # entry kept for protocol compatibility (see key_mapping.py's module
@@ -127,6 +165,84 @@ _MIC_ROW_DISPLAY = "触发语音（免按住：右 Alt+空格；长按：右 Alt
 _USER_FACING_BUTTON_IDS = frozenset(device_profile.ALL_BUTTON_IDS - {"volume_mute"})
 
 _ENDPOINT_NAME_HOST_API_SEPARATOR = " — "
+
+_VIRTUAL_AUDIO_NAME_HINTS = (
+    "cable input",
+    "vb-audio",
+    "voicemeeter",
+    "virtual audio",
+    "virtual cable",
+    "steelseries sonar",
+    "wave link",
+    "blackhole",
+    "nvidia broadcast",
+)
+
+
+def is_likely_virtual_audio_endpoint(endpoint: audio_output.AudioEndpoint) -> bool:
+    """Best-effort presentation filter; never an authorization boundary.
+
+    Windows/PortAudio does not expose a reliable universal ``is_virtual``
+    flag.  Known virtual-card names get the compact default treatment, while
+    the UI's explicit "show all" control remains the lossless escape hatch for
+    an unknown or newly released driver.
+    """
+
+    normalized = endpoint.name.casefold()
+    return audio_output.is_cable_input_endpoint(endpoint.name) or any(
+        hint in normalized for hint in _VIRTUAL_AUDIO_NAME_HINTS
+    )
+
+
+def compact_bridge_endpoint_options(
+    endpoints: Sequence[audio_output.AudioEndpoint],
+    *,
+    current_display: str = "",
+) -> List[str]:
+    """Return one preferred interface per detected virtual playback device."""
+
+    grouped: Dict[str, List[audio_output.AudioEndpoint]] = {}
+    for endpoint in endpoints:
+        if is_likely_virtual_audio_endpoint(endpoint):
+            grouped.setdefault(endpoint.name.casefold(), []).append(endpoint)
+
+    selected = []
+    for candidates in grouped.values():
+        preferred = min(
+            candidates,
+            key=lambda endpoint: (
+                0 if "wasapi" in endpoint.host_api.casefold() else 1,
+                endpoint.host_api.casefold(),
+            ),
+        )
+        selected.append(preferred)
+    selected.sort(
+        key=lambda endpoint: (
+            0 if audio_output.is_cable_input_endpoint(endpoint.name) else 1,
+            endpoint.name.casefold(),
+        )
+    )
+    options = [_endpoint_display(endpoint) for endpoint in selected]
+    if current_display and current_display not in options:
+        options.insert(0, current_display)
+    return options
+
+
+def bridge_endpoint_help(display_text: str) -> str:
+    """User-facing pairing guidance for the selected playback endpoint."""
+
+    name, _host_api = _parse_endpoint_display(display_text)
+    if not name:
+        return "请选择一个虚拟声卡的播放端点。"
+    if audio_output.is_cable_input_endpoint(name):
+        return (
+            "Remote Mic 把声音桥接到 CABLE Input；Codex、Typeless 等软件的"
+            "麦克风请选择 CABLE Output。"
+        )
+    return (
+        "Remote Mic 将声音桥接到所选设备；请在 Codex、Typeless 等软件中选择"
+        "该虚拟声卡对应的麦克风端点。其他虚拟声卡暂不支持空闲麦克风检测。"
+    )
 
 
 class SettingsValidationError(Exception):
@@ -146,6 +262,12 @@ def _action_to_display(action: key_mapping.ButtonAction) -> str:
         return "禁用"
     if action.kind == key_mapping.ActionKind.VOICE:
         return _VOICE_DISPLAY
+    if action.kind == key_mapping.ActionKind.TYPE_TEXT:
+        return _TEXT_SUBMIT_PREFIX + action.text
+    if action.kind == key_mapping.ActionKind.TYPE_TEXT_AND_SUBMIT:
+        return _TEXT_SUBMIT_PREFIX + action.text
+    if action.kind == key_mapping.ActionKind.TYPE_EXECUTE_AND_SUBMIT:
+        return _TEXT_SUBMIT_PREFIX + "执行"
     reference_label = _REFERENCE_ACTION_LABELS.get(action.kind)
     if reference_label is not None:
         return reference_label
@@ -159,10 +281,40 @@ def _action_to_display(action: key_mapping.ButtonAction) -> str:
 
 def _display_to_action(text: str) -> key_mapping.ButtonAction:
     text = text.strip()
+    if text.startswith(_ACTION_CATEGORY_PREFIX):
+        raise hotkey.HotkeyParseError("请选择分类下的具体动作")
     if text in ("禁用", "disabled", SECONDARY_UNCONFIGURED_DISPLAY):
         return key_mapping.ButtonAction(key_mapping.ActionKind.DISABLED)
     if text == _VOICE_DISPLAY:
         return key_mapping.ButtonAction(key_mapping.ActionKind.VOICE)
+    if text in (
+        _TEXT_SUBMIT_PRESET,
+        _LEGACY_TEXT_SUBMIT_PRESET,
+        _LEGACY_EXECUTE_SUBMIT_DISPLAY,
+    ):
+        return key_mapping.ButtonAction(
+            key_mapping.ActionKind.TYPE_TEXT,
+            text="执行",
+        )
+    matching_prefix = next(
+        (
+            prefix
+            for prefix in (_TEXT_SUBMIT_PREFIX, _LEGACY_TEXT_SUBMIT_PREFIX)
+            if text.startswith(prefix)
+        ),
+        None,
+    )
+    if matching_prefix is not None:
+        try:
+            payload = key_mapping.normalize_text_submit(
+                text[len(matching_prefix) :]
+            )
+        except ValueError as exc:
+            raise hotkey.HotkeyParseError(str(exc)) from exc
+        return key_mapping.ButtonAction(
+            key_mapping.ActionKind.TYPE_TEXT,
+            text=payload,
+        )
     if text == "系统音量 -":
         text = "系统音量 −"
     reference_kind = _REFERENCE_ACTION_KINDS_BY_LABEL.get(text)
@@ -210,6 +362,10 @@ def build_save_model(
     base_config: dict,
     base_bindings: dict,
     selected_device_profile: str = device_catalog.RC003_ID,
+    text_menu_items: Optional[Sequence[dict]] = None,
+    unified_virtual_input_enabled: Optional[bool] = None,
+    unified_on_demand_enabled: Optional[bool] = None,
+    system_input_endpoint_display_text: Optional[str] = None,
 ) -> Tuple[dict, dict]:
     """Pure validation+build step for "Save"/"Restore defaults", with no Tk
     dependency at all - directly unit tested without constructing any
@@ -283,6 +439,34 @@ def build_save_model(
     bindings["mic"] = key_mapping.ButtonAction(key_mapping.ActionKind.VOICE).to_dict()
 
     endpoint_name, endpoint_host_api = _parse_endpoint_display(endpoint_display_text)
+    unified_enabled = (
+        bool(base_config.get("unified_virtual_input_enabled", False))
+        if unified_virtual_input_enabled is None
+        else bool(unified_virtual_input_enabled)
+    )
+    on_demand_enabled = (
+        bool(base_config.get("unified_on_demand_enabled", True))
+        if unified_on_demand_enabled is None
+        else bool(unified_on_demand_enabled)
+    )
+    if system_input_endpoint_display_text is None:
+        system_input_name = str(base_config.get("system_input_endpoint_name", ""))
+        system_input_host_api = str(
+            base_config.get("system_input_endpoint_host_api", "")
+        )
+    else:
+        system_input_name, system_input_host_api = _parse_endpoint_display(
+            system_input_endpoint_display_text
+        )
+    if unified_enabled:
+        if not endpoint_name:
+            raise SettingsValidationError(None, "请先选择要桥接到的虚拟音频设备。")
+        if not system_input_name:
+            raise SettingsValidationError(None, "请先选择要透明转发的系统麦克风。")
+        if audio_output.is_cable_output_endpoint(system_input_name):
+            raise SettingsValidationError(
+                None, "系统麦克风不能选择 CABLE Output，否则会形成音频回路。"
+            )
 
     new_config = dict(base_config)
     new_config["selected_device_profile"] = device_catalog.normalize_device_id(
@@ -292,10 +476,35 @@ def build_save_model(
     new_config["voice_trigger_mode"] = trigger_mode.value
     new_config["output_endpoint_name"] = endpoint_name
     new_config["output_endpoint_host_api"] = endpoint_host_api
+    new_config["unified_virtual_input_enabled"] = unified_enabled
+    # The current Core Audio consumer detector can identify the paired
+    # CABLE Output session for VB-CABLE.  Unknown virtual cards expose no
+    # universal playback->recording endpoint relationship, so they use the
+    # established continuous-forwarding behavior instead of polling an
+    # unrelated CABLE Output and accidentally muting the selected route.
+    new_config["unified_on_demand_enabled"] = bool(
+        on_demand_enabled and audio_output.is_cable_input_endpoint(endpoint_name)
+    )
+    new_config["system_input_endpoint_name"] = system_input_name
+    new_config["system_input_endpoint_host_api"] = system_input_host_api
 
     new_bindings = dict(base_bindings)
     new_bindings["bindings"] = bindings
     new_bindings["secondary_bindings"] = secondary_bindings
+    raw_text_menu_items = (
+        base_bindings.get("text_menu_items", [])
+        if text_menu_items is None
+        else text_menu_items
+    )
+    try:
+        normalized_text_menu_items = key_mapping.normalize_text_menu_items(
+            raw_text_menu_items
+        )
+    except (TypeError, ValueError) as exc:
+        raise SettingsValidationError(None, f"文本菜单无效：{exc}") from exc
+    new_bindings["text_menu_items"] = [
+        item.to_dict() for item in normalized_text_menu_items
+    ]
 
     return new_config, new_bindings
 
@@ -361,9 +570,8 @@ def describe_launch_result(result: bridge_launcher.LaunchResult) -> str:
     if result.outcome is bridge_launcher.LaunchOutcome.ALREADY_RUNNING:
         return (
             "已经在运行：这次启动被单实例保护拒绝，进程立即退出（退出码 "
-            f"{result.exit_code}）。不需要再次启动；如需重启，请先从任务管理器结束 "
-            "现有 RemoteMicRC003 进程，或使用 Start Menu 的“停止”条目/"
-            "便携版的手动停止步骤。"
+            f"{result.exit_code}）。设置页会自动刷新桥接状态；请等待按钮显示为"
+            "“保存并重启桥接”后重试。"
         )
     if result.outcome is bridge_launcher.LaunchOutcome.QUICK_EXIT:
         return (
@@ -371,10 +579,7 @@ def describe_launch_result(result: bridge_launcher.LaunchResult) -> str:
             "建立 BLE/HID/音频连接。请用下方“打开日志目录”查看 app.log 了解具体原因。"
         )
     # LAUNCH_FAILED
-    return (
-        f"启动失败：无法创建桥接进程（{result.error}）。请用下方“打开日志目录”查看 "
-        "app.log，并确认安装/便携版文件是否完整。"
-    )
+    return f"启动或重启失败（{result.error}）。请用下方“打开日志目录”查看 app.log。"
 
 
 def describe_log_open_result(result: logging_setup.LogOpenResult) -> str:

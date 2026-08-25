@@ -13,7 +13,14 @@ import sys
 import unittest
 
 from ovb_rc003 import __main__ as main_module
-from ovb_rc003 import app, config, device_catalog, single_instance, windows_diagnostics
+from ovb_rc003 import (
+    app,
+    config,
+    device_catalog,
+    single_instance,
+    text_menu_overlay,
+    windows_diagnostics,
+)
 
 
 def _make_guard_class(*, raise_on_enter=None, enter_calls=None):
@@ -300,6 +307,22 @@ class ArgumentModeBypassTests(_ArgvRestoringTestCase):
         finally:
             windows_diagnostics.run_ble_diagnostics_subprocess_entrypoint = original_entrypoint
 
+        self.assertEqual(enter_calls, [])
+
+    def test_text_menu_overlay_dispatches_without_touching_the_guard(self):
+        enter_calls = []
+        single_instance.BridgeInstanceGuard = _make_guard_class(enter_calls=enter_calls)
+        app.main = lambda: self.fail("overlay helper must never call app.main()")
+        original_entrypoint = text_menu_overlay.run_qt_text_menu_overlay
+        text_menu_overlay.run_qt_text_menu_overlay = lambda: 6
+        sys.argv = ["ovb_rc003", "--text-menu-overlay"]
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                main_module.main()
+        finally:
+            text_menu_overlay.run_qt_text_menu_overlay = original_entrypoint
+
+        self.assertEqual(ctx.exception.code, 6)
         self.assertEqual(enter_calls, [])
 
 

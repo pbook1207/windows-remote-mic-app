@@ -26,10 +26,16 @@
 .PARAMETER PythonExecutable
     Python interpreter to create the virtual environment with. Defaults to
     "py -3.12" if available, else "python".
+
+.PARAMETER VenvPath
+    Virtual-environment path. Defaults to ``.venv``. A short absolute path is
+    useful on Windows machines without Long Paths enabled because Qt's wheel
+    contains deeply nested QML build metadata.
 #>
 
 param(
-    [string]$PythonExecutable = "python"
+    [string]$PythonExecutable = "python",
+    [string]$VenvPath = ".venv"
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,11 +52,11 @@ Write-Host "== Remote Mic · RC003 candidate build =="
 
 Push-Location $RC003Root
 try {
-    if (-not (Test-Path ".venv")) {
-        & $PythonExecutable -m venv .venv
+    if (-not (Test-Path $VenvPath)) {
+        & $PythonExecutable -m venv $VenvPath
         Assert-LastExitCode "python -m venv"
     }
-    $venvPython = Join-Path ".venv" "Scripts\python.exe"
+    $venvPython = Join-Path $VenvPath "Scripts\python.exe"
 
     & $venvPython -m pip install --upgrade pip
     Assert-LastExitCode "pip install --upgrade pip"

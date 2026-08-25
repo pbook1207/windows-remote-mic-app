@@ -5,7 +5,8 @@
 ;
 ; Hard boundaries enforced by this script:
 ;   - PrivilegesRequired=lowest (no admin elevation requested, ever).
-;   - No [Tasks]/[Icons] entry adds a login-autostart shortcut.
+;   - Installation never enables login startup by default. The user may
+;     explicitly enable it later in Settings; uninstall removes that value.
 ;   - This INSTALLER SCRIPT never installs, configures, silently modifies,
 ;     or removes VB-CABLE or any other driver, and never elevates itself to
 ;     do so, during install OR uninstall (XRBM-031 RETRY 1 item 5 - this
@@ -24,7 +25,7 @@
 
 #define AppName "Remote Mic · RC003"
 #define AppPublisher "Remote Mic contributors"
-#define AppVersion "0.1.0-candidate"
+#define AppVersion "0.1.0-hidtapfix.31"
 #define AppExeName "RemoteMicRC003.exe"
 #define AppFolder "RC003"
 #define DistDir "..\dist\RemoteMicRC003"
@@ -90,6 +91,12 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "
 ; bridge (that would touch BLE/HID/audio before the user has configured
 ; anything) - unchecked by default either way.
 Filename: "{app}\{#AppExeName}"; Parameters: "--settings"; Description: "打开 {#AppName} 设置"; Flags: postinstall nowait skipifsilent unchecked
+
+[Registry]
+; The app itself creates this value only after the user opts in. This entry
+; writes nothing during installation and exists solely to remove a possible
+; per-user Startup Apps value during uninstall.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "RemoteMicRC003"; Flags: uninsdeletevalue
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\stop-app.ps1"" -AppPath ""{app}"""; Flags: runhidden
