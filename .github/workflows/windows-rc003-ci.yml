@@ -41,6 +41,7 @@ name: windows-rc003-ci
 # of them must re-run this workflow even though none of them live under
 # apps/windows/rc003/.
 on:
+  workflow_dispatch:
   push:
     paths:
       - "apps/windows/rc003/**"
