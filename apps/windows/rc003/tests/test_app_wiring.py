@@ -26,9 +26,16 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ovb_rc003 import app as app_module
-from ovb_rc003 import config, key_mapping, logging_setup, raw_input_windows, win32_input
+from ovb_rc003 import (
+    config,
+    key_mapping,
+    logging_setup,
+    raw_input_windows,
+    win32_input,
+)
 from ovb_rc003.atvv_session import AudioStarted, AudioStopped, MicButtonPressed
 
 
@@ -383,6 +390,146 @@ class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
         self.assertTrue(self.app._voice.active)
         self.assertEqual(self.app._ble_session.mic_open_calls, 0)
 
+    def test_typeless_mode_taps_right_alt_once_at_start_and_once_at_stop(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        hotkey_calls = []
+        fake_timer = mock.Mock()
+        original = win32_input.send_typeless_key_combo_tap
+        win32_input.send_typeless_key_combo_tap = lambda tokens: hotkey_calls.append(tokens)
+        try:
+            with mock.patch.object(
+                app_module.threading, "Timer", return_value=fake_timer
+            ) as timer_factory:
+                self.assertFalse(self.app._legacy_voice_transform_enabled())
+                self.app._on_control_event(AudioStarted(session_id=1))
+                self.app._typeless_last_tap_completed_at -= 1.0
+                self.app._on_control_event(AudioStopped())
+                self.assertEqual(hotkey_calls, [("ralt",)])
+                timer_factory.call_args.args[1]()
+        finally:
+            win32_input.send_typeless_key_combo_tap = original
+
+        self.assertEqual(hotkey_calls, [("ralt",), ("ralt",)])
+        self.assertFalse(self.app._voice.active)
+
+    def test_typeless_audio_stop_does_not_close_until_physical_mic_release(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        hotkey_calls = []
+
+        fake_timer = mock.Mock()
+        with mock.patch.object(
+            win32_input,
+            "send_typeless_key_combo_tap",
+            side_effect=lambda tokens: hotkey_calls.append(tokens),
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=fake_timer
+        ) as timer_factory:
+            self.app._on_control_event(AudioStarted(session_id=1))
+            self.app._on_direct_hid_report(1, b"\x3e\x00\x00\x00\x00\x00")
+            self.app._on_control_event(AudioStopped())
+
+            self.assertEqual(hotkey_calls, [("ralt",)])
+            self.assertTrue(self.app._voice.active)
+
+            self.app._typeless_last_tap_completed_at -= 1.0
+            self.app._on_direct_hid_report(1, b"\x00\x00\x00\x00\x00\x00")
+
+            self.assertEqual(hotkey_calls, [("ralt",)])
+            timer_factory.call_args.args[1]()
+
+        self.assertEqual(hotkey_calls, [("ralt",), ("ralt",)])
+        self.assertFalse(self.app._voice.active)
+
+    def test_direct_hid_release_overrides_a_stale_legacy_f5_down_latch(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        fake_timer = mock.Mock()
+
+        with mock.patch.object(
+            win32_input, "send_typeless_key_combo_tap", return_value=None
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=fake_timer
+        ) as timer_factory:
+            self.app._on_control_event(AudioStarted(session_id=1))
+            self.app._on_direct_hid_report(1, b"\x3e\x00\x00\x00\x00\x00")
+            self.app._legacy_f5_is_down = True
+            self.app._typeless_last_tap_completed_at -= 1.0
+            self.app._on_direct_hid_report(1, b"\x00\x00\x00\x00\x00\x00")
+
+        timer_factory.assert_called_once()
+        fake_timer.start.assert_called_once_with()
+
+    def test_typeless_short_release_uses_timer_without_blocking_atvv_thread(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
+        self.app._voice.on_mic_button_pressed()
+        self.app._typeless_last_tap_completed_at = 10.0
+        fake_timer = mock.Mock()
+
+        with mock.patch.object(
+            app_module.time, "monotonic", return_value=10.2
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=fake_timer
+        ) as timer_factory:
+            with self.app._voice_trigger_lock:
+                self.app._request_typeless_close_locked("test release")
+
+        timer_factory.assert_called_once()
+        self.assertAlmostEqual(timer_factory.call_args.args[0], 0.55)
+        self.assertTrue(fake_timer.daemon)
+        fake_timer.start.assert_called_once_with()
+        self.assertTrue(self.app._voice.active)
+
+    def test_typeless_start_only_diagnostic_never_sends_closing_right_alt(self):
+        self.app._voice.trigger_mode = (
+            key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY
+        )
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        hotkey_calls = []
+
+        fake_timer = mock.Mock()
+        with mock.patch.object(
+            win32_input,
+            "send_typeless_key_combo_tap",
+            side_effect=lambda tokens: hotkey_calls.append(tokens),
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=fake_timer
+        ):
+            self.app._on_control_event(AudioStarted(session_id=1))
+            self.app._on_direct_hid_report(1, b"\x3e\x00\x00\x00\x00\x00")
+            self.app._on_direct_hid_report(1, b"\x00\x00\x00\x00\x00\x00")
+            self.app._on_control_event(AudioStopped())
+
+        self.assertEqual(hotkey_calls, [("ralt",)])
+        self.assertTrue(self.app._voice.active)
+
+    def test_typeless_start_only_stream_bounce_does_not_send_second_right_alt(self):
+        self.app._voice.trigger_mode = (
+            key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY
+        )
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        hotkey_calls = []
+        fake_timer = mock.Mock()
+
+        with mock.patch.object(
+            win32_input,
+            "send_typeless_key_combo_tap",
+            side_effect=lambda tokens: hotkey_calls.append(tokens),
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=fake_timer
+        ):
+            self.app._on_control_event(AudioStarted(session_id=1))
+            self.app._on_direct_hid_report(1, b"\x3e\x00\x00\x00\x00\x00")
+            self.app._on_direct_hid_report(1, b"\x00\x00\x00\x00\x00\x00")
+            self.app._on_control_event(AudioStopped())
+            self.app._on_direct_hid_report(1, b"\x3e\x00\x00\x00\x00\x00")
+            self.app._on_control_event(AudioStarted(session_id=1))
+
+        self.assertTrue(fake_timer.cancel.called)
+        self.assertEqual(hotkey_calls, [("ralt",)])
+        self.assertTrue(self.app._voice.active)
+
     def test_late_mic_button_after_audio_start_does_not_send_a_second_alt(self):
         hotkey_calls = []
         original = win32_input.send_voice_key_combo_tap
@@ -480,9 +627,59 @@ class CorruptButtonBindingFailsClosedTests(_AppWiringTestCase):
 
 
 class OrdinaryButtonGestureWiringTests(_AppWiringTestCase):
+    def test_direct_hid_edges_are_mirrored_to_settings_detection_relay(self):
+        published = []
+
+        class _Publisher:
+            def publish(self, button_id, is_pressed):
+                published.append((button_id, is_pressed))
+                return True
+
+            def close(self):
+                pass
+
+        self.app._button_detection_publisher = _Publisher()
+        original = self.app._on_button_event
+        self.app._on_button_event = lambda *_args, **_kwargs: None
+        try:
+            self.app._on_direct_hid_report(1, b"\x80\x00\x00\x00\x00\x00")
+            self.app._on_direct_hid_report(1, b"\x00\x00\x00\x00\x00\x00")
+        finally:
+            self.app._on_button_event = original
+
+        self.assertEqual(published, [("volume_up", True), ("volume_up", False)])
+
+    def test_raw_input_is_relay_fallback_only_while_direct_tap_is_inactive(self):
+        published = []
+
+        class _Publisher:
+            def publish(self, button_id, is_pressed):
+                published.append((button_id, is_pressed))
+                return True
+
+            def close(self):
+                pass
+
+        self.app._button_detection_publisher = _Publisher()
+        event = raw_input_windows.RawInputEvent(
+            source="keyboard",
+            is_pressed=True,
+            button_id="up",
+            vkey=0x26,
+            make_code=0x48,
+            flags=0x02,
+        )
+        self.app._on_raw_input_event(event)
+        self.app._direct_hid_tap_active = True
+        self.app._on_raw_input_event(event)
+
+        self.assertEqual(published, [("up", True)])
+
     def test_saved_mapping_is_reloaded_before_the_next_button_event(self):
         updated = config.default_key_bindings()
+        updated = config.create_mapping_profile(updated, "热更新测试")
         updated["bindings"]["back"] = {"kind": "key_combo", "keys": ["f8"]}
+        updated = config.update_active_mapping_profile(updated)
         config.save_key_bindings(self.app._bindings_path, updated)
 
         calls = []
@@ -525,6 +722,40 @@ class OrdinaryButtonGestureWiringTests(_AppWiringTestCase):
 
         self.assertEqual(calls, ["arrow_up"])
 
+    def test_vibe_coding_actions_use_their_windows_executors(self):
+        expected = {
+            key_mapping.ActionKind.SCROLL_UP: "send_mouse_wheel_up",
+            key_mapping.ActionKind.SCROLL_DOWN: "send_mouse_wheel_down",
+            key_mapping.ActionKind.VIRTUAL_DESKTOP_LEFT: "send_virtual_desktop_left",
+            key_mapping.ActionKind.VIRTUAL_DESKTOP_RIGHT: "send_virtual_desktop_right",
+            key_mapping.ActionKind.TASK_VIEW: "send_task_view",
+            key_mapping.ActionKind.CLIPBOARD_HISTORY: "send_clipboard_history",
+            key_mapping.ActionKind.PREVIOUS_TAB: "send_previous_tab",
+            key_mapping.ActionKind.NEXT_TAB: "send_next_tab",
+            key_mapping.ActionKind.SNAP_WINDOW_LEFT: "send_snap_window_left",
+            key_mapping.ActionKind.SNAP_WINDOW_RIGHT: "send_snap_window_right",
+        }
+        for action_kind, function_name in expected.items():
+            calls = []
+            with self.subTest(action_kind=action_kind), mock.patch.object(
+                win32_input, function_name, side_effect=lambda: calls.append(action_kind)
+            ):
+                self.app._apply_button_action(key_mapping.ButtonAction(action_kind))
+                self.assertEqual(calls, [action_kind])
+
+    def test_scroll_repeats_on_any_button_but_return_on_ok_does_not(self):
+        self.app._bindings["bindings"]["ok"] = {
+            "kind": key_mapping.ActionKind.SCROLL_DOWN.value,
+            "keys": [],
+        }
+        self.assertTrue(self.app._is_button_repeatable("ok"))
+
+        self.app._bindings["bindings"]["ok"] = {
+            "kind": key_mapping.ActionKind.RETURN.value,
+            "keys": [],
+        }
+        self.assertFalse(self.app._is_button_repeatable("ok"))
+
     def test_open_app_action_uses_application_executor(self):
         calls = []
         original = getattr(app_module, "open_configured_application", None)
@@ -540,6 +771,94 @@ class OrdinaryButtonGestureWiringTests(_AppWiringTestCase):
                 app_module.open_configured_application = original
 
         self.assertEqual(calls, [key_mapping.ActionKind.OPEN_CODEX])
+
+    def test_custom_text_action_types_configured_text_without_return(self):
+        calls = []
+        original = win32_input.send_text
+        win32_input.send_text = lambda text: calls.append(text)
+        try:
+            self.app._apply_button_action(
+                key_mapping.ButtonAction(
+                    key_mapping.ActionKind.TYPE_TEXT,
+                    text="继续处理 ✅",
+                )
+            )
+        finally:
+            win32_input.send_text = original
+
+        self.assertEqual(calls, ["继续处理 ✅"])
+
+    def test_fixed_execute_prototype_action_remains_compatible(self):
+        calls = []
+        original = win32_input.send_text
+        win32_input.send_text = lambda text: calls.append(text)
+        try:
+            self.app._apply_button_action(
+                key_mapping.ButtonAction(
+                    key_mapping.ActionKind.TYPE_EXECUTE_AND_SUBMIT
+                )
+            )
+        finally:
+            win32_input.send_text = original
+
+        self.assertEqual(calls, ["执行"])
+
+    def test_open_text_menu_action_uses_configured_items(self):
+        toggled = []
+
+        class _Menu:
+            is_open = False
+
+            def toggle(self, items):
+                toggled.append(tuple(items))
+                return True
+
+        self.app._text_menu = _Menu()
+        self.app._bindings["text_menu_items"] = [
+            {"label": "总结", "text": "请总结上述内容", "enabled": True}
+        ]
+
+        self.app._apply_button_action(
+            key_mapping.ButtonAction(key_mapping.ActionKind.OPEN_TEXT_MENU)
+        )
+
+        self.assertEqual(toggled[0][0].label, "总结")
+        self.assertEqual(toggled[0][0].text, "请总结上述内容")
+
+    def test_text_menu_navigation_consumes_edges_and_inputs_without_return(self):
+        moves = []
+        close_calls = []
+
+        class _Menu:
+            is_open = True
+
+            def move(self, delta):
+                moves.append(delta)
+
+            def confirm(self):
+                self.is_open = False
+                return "选择后的文本"
+
+            def close(self):
+                self.is_open = False
+                close_calls.append(True)
+
+        self.app._text_menu = _Menu()
+        text_calls = []
+        original = win32_input.send_text
+        win32_input.send_text = lambda text: text_calls.append(text)
+        try:
+            self.app._on_button_event("down", True)
+            self.app._on_button_event("down", False)
+            self.app._on_button_event("ok", True)
+            self.app._on_button_event("ok", False)
+        finally:
+            win32_input.send_text = original
+
+        self.assertEqual(moves, [1])
+        self.assertEqual(text_calls, ["选择后的文本"])
+        self.assertEqual(close_calls, [])
+        self.assertEqual(self.app._text_menu_consumed_buttons, set())
 
     def test_one_physical_press_emits_one_mapping_action(self):
         calls = []
@@ -574,6 +893,27 @@ class OrdinaryButtonGestureWiringTests(_AppWiringTestCase):
         )
 
         self.assertEqual(armed, [(0x26, 0x48, True, True)])
+
+    def test_direct_hid_hold_tracks_repeat_suppression_and_only_arms_down(self):
+        tracked = []
+        armed = []
+
+        class _Suppressor:
+            def track_direct_key_hold(self, *args):
+                tracked.append(args)
+
+            def arm_key_event(self, *args):
+                armed.append(args)
+
+        self.app._legacy_key_suppressor = _Suppressor()
+        self.app._arm_from_direct_usage(0x0028, True)
+        self.app._arm_from_direct_usage(0x0028, False)
+
+        self.assertEqual(
+            tracked,
+            [(0x0D, 0x1C, False, True), (0x0D, 0x1C, False, False)],
+        )
+        self.assertEqual(armed, [(0x0D, 0x1C, False, True)])
 
     def test_unknown_or_unbound_raw_keyboard_edge_is_not_armed(self):
         armed = []

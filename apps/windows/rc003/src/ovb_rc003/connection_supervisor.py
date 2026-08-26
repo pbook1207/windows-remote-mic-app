@@ -79,6 +79,15 @@ class ConnectionSupervisor:
 
         self._loop.call_soon_threadsafe(self._disconnect_event.set)
 
+    def request_stop(self) -> None:
+        """Thread-safe synchronous request for a graceful final cleanup."""
+
+        def _request_on_loop() -> None:
+            self._stopping = True
+            self._disconnect_event.set()
+
+        self._loop.call_soon_threadsafe(_request_on_loop)
+
     async def run_forever(self) -> None:
         while not self._stopping:
             self.attempt_count += 1

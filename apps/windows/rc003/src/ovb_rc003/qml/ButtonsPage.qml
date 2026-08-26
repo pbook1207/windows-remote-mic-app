@@ -16,7 +16,27 @@ Item {
     id: root
     property var tokens
 
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.visible
+        onTriggered: SettingsController.refreshBridgeStatus()
+    }
+
     readonly property real photoAspectRatio: 1030 / 508
+    readonly property string textSubmitPreset: qsTr("输入文本…")
+    readonly property string textSubmitPrefix: qsTr("输入文本：")
+    readonly property string legacyTextSubmitPrefix: qsTr("输入文本并回车：")
+
+    function isActionCategory(value) {
+        return (value || "").indexOf("── ") === 0
+    }
+
+    function activeProfileName() {
+        var names = SettingsController.mappingProfileNames
+        var index = SettingsController.activeMappingProfileIndex
+        return index >= 0 && index < names.length ? names[index] : ""
+    }
 
     function openShortcutRecorder(buttonId, rowIndex, isMic, trigger) {
         shortcutRecorder.buttonId = buttonId
@@ -25,6 +45,32 @@ Item {
         shortcutRecorder.trigger = trigger || "single_click"
         shortcutRecorder.previewText = qsTr("请按下要映射的真实按键")
         shortcutRecorder.open()
+    }
+
+    function isTextSubmitAction(actionText) {
+        var value = actionText || ""
+        return value === textSubmitPreset
+            || value === qsTr("输入自定义文本并回车…")
+            || value === qsTr("输入“执行”并回车")
+            || value.indexOf(textSubmitPrefix) === 0
+            || value.indexOf(legacyTextSubmitPrefix) === 0
+    }
+
+    function textSubmitPayload(actionText) {
+        var value = actionText || ""
+        if (value.indexOf(textSubmitPrefix) === 0)
+            return value.substring(textSubmitPrefix.length)
+        if (value.indexOf(legacyTextSubmitPrefix) === 0)
+            return value.substring(legacyTextSubmitPrefix.length)
+        return qsTr("执行")
+    }
+
+    function openTextSubmitEditor(rowIndex, trigger, actionText) {
+        textSubmitEditor.rowIndex = rowIndex
+        textSubmitEditor.trigger = trigger || "single_click"
+        textSubmitEditor.previousActionText = actionText || textSubmitPreset
+        textSubmitField.text = textSubmitPayload(actionText)
+        textSubmitEditor.open()
     }
 
     Dialog {
@@ -95,6 +141,245 @@ Item {
                     font.pixelSize: tokens.fontSizeSmall
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: textSubmitEditor
+        objectName: "textSubmitEditorDialog"
+        modal: true
+        anchors.centerIn: parent
+        width: 480
+        title: qsTr("编辑要输入的文本")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        property int rowIndex: -1
+        property string trigger: "single_click"
+        property string previousActionText: ""
+
+        onOpened: {
+            textSubmitField.forceActiveFocus()
+            textSubmitField.selectAll()
+        }
+
+        onAccepted: {
+            var payload = textSubmitField.text.trim()
+            if (payload.length === 0)
+                return
+            var displayText = root.textSubmitPrefix + payload
+            if (trigger === "single_click")
+                ButtonMappingModel.setActionTextAt(rowIndex, displayText)
+            else
+                ButtonMappingModel.setSecondaryActionTextAt(
+                    rowIndex, trigger, displayText
+                )
+        }
+
+        contentItem: ColumnLayout {
+            spacing: tokens.spacingSmall
+
+            TextField {
+                id: textSubmitField
+                objectName: "textSubmitField"
+                Layout.fillWidth: true
+                maximumLength: 200
+                placeholderText: qsTr("例如：执行、继续、请总结上述内容")
+                selectByMouse: true
+                Accessible.name: qsTr("要输入的文本")
+            }
+
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("支持中文、英文、数字、标点和 Emoji，最多 200 个字符。触发时只把这一行文字发送到当前输入框，不会自动按回车。")
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+
+            Label {
+                Layout.fillWidth: true
+                visible: textSubmitField.text.trim().length === 0
+                text: qsTr("文本不能为空；如不需要此动作，请在映射中选择“禁用”。")
+                color: tokens.errorColor
+                font.pixelSize: tokens.fontSizeSmall
+            }
+        }
+    }
+
+    Dialog {
+        id: textMenuEditor
+        objectName: "textMenuEditorDialog"
+        modal: true
+        anchors.centerIn: parent
+        width: 760
+        height: 520
+        title: qsTr("编辑文本选择菜单")
+        standardButtons: Dialog.Close
+
+        contentItem: ColumnLayout {
+            spacing: tokens.spacingSmall
+
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("每项可分别设置标题和文本。关闭后点击“保存当前方案”才会写入配置。菜单只输入文字，不会按回车。")
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+
+            ListView {
+                id: textMenuList
+                objectName: "textMenuItemList"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: tokens.spacingTiny
+                model: SettingsController.textMenuItems
+                ScrollBar.vertical: ScrollBar { }
+
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    width: textMenuList.width
+                        - (textMenuList.ScrollBar.vertical.visible ? 10 : 0)
+                    height: 54
+                    radius: tokens.cornerRadiusSmall
+                    color: tokens.fieldBackground
+                    border.color: tokens.border
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: tokens.spacingTiny
+                        spacing: tokens.spacingTiny
+
+                        CheckBox {
+                            id: enabledCheck
+                            checked: modelData.enabled
+                            text: qsTr("启用")
+                            onToggled: SettingsController.updateTextMenuItem(
+                                index, labelField.text, valueField.text, checked
+                            )
+                        }
+                        TextField {
+                            id: labelField
+                            Layout.preferredWidth: 130
+                            maximumLength: 40
+                            text: modelData.label
+                            placeholderText: qsTr("标题")
+                            onEditingFinished: SettingsController.updateTextMenuItem(
+                                index, text, valueField.text, enabledCheck.checked
+                            )
+                        }
+                        TextField {
+                            id: valueField
+                            Layout.fillWidth: true
+                            maximumLength: 200
+                            text: modelData.text
+                            placeholderText: qsTr("文本")
+                            onEditingFinished: SettingsController.updateTextMenuItem(
+                                index, labelField.text, text, enabledCheck.checked
+                            )
+                        }
+                        Button {
+                            text: qsTr("↑")
+                            enabled: index > 0
+                            onClicked: SettingsController.moveTextMenuItem(index, -1)
+                            Accessible.name: qsTr("上移文本菜单项目")
+                        }
+                        Button {
+                            text: qsTr("↓")
+                            enabled: index + 1 < textMenuList.count
+                            onClicked: SettingsController.moveTextMenuItem(index, 1)
+                            Accessible.name: qsTr("下移文本菜单项目")
+                        }
+                        Button {
+                            text: qsTr("删")
+                            onClicked: SettingsController.removeTextMenuItem(index)
+                            Accessible.name: qsTr("删除文本菜单项目")
+                        }
+                    }
+                }
+            }
+
+            Button {
+                text: qsTr("添加菜单项目")
+                onClicked: SettingsController.addTextMenuItem(
+                    qsTr("新项目"), qsTr("新文本"), true
+                )
+            }
+        }
+    }
+
+    Dialog {
+        id: profileNameDialog
+        objectName: "mappingProfileNameDialog"
+        modal: true
+        anchors.centerIn: parent
+        width: 420
+        title: renameMode ? qsTr("重命名配置方案") : qsTr("新建配置方案")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        property bool renameMode: false
+
+        function openForCreate() {
+            renameMode = false
+            profileNameField.text = ""
+            open()
+        }
+
+        function openForRename() {
+            renameMode = true
+            profileNameField.text = root.activeProfileName()
+            open()
+        }
+
+        onOpened: {
+            profileNameField.forceActiveFocus()
+            profileNameField.selectAll()
+        }
+        onAccepted: {
+            if (renameMode)
+                SettingsController.renameActiveMappingProfile(profileNameField.text)
+            else
+                SettingsController.createMappingProfile(profileNameField.text)
+        }
+
+        contentItem: ColumnLayout {
+            spacing: tokens.spacingSmall
+            TextField {
+                id: profileNameField
+                objectName: "mappingProfileNameField"
+                Layout.fillWidth: true
+                maximumLength: 40
+                placeholderText: qsTr("方案名称")
+                selectByMouse: true
+            }
+            Label {
+                Layout.fillWidth: true
+                text: profileNameDialog.renameMode
+                    ? qsTr("只修改方案名称，不改变其中的按键映射。")
+                    : qsTr("直接复制当前方案的全部映射和快捷文本菜单。")
+                wrapMode: Text.WordWrap
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+        }
+    }
+
+    Dialog {
+        id: deleteProfileDialog
+        objectName: "deleteMappingProfileDialog"
+        modal: true
+        anchors.centerIn: parent
+        width: 420
+        title: qsTr("删除配置方案")
+        standardButtons: Dialog.Yes | Dialog.Cancel
+        onAccepted: SettingsController.deleteActiveMappingProfile()
+
+        contentItem: Label {
+            text: qsTr("确定删除“%1”吗？删除后会切换到保留的第一个方案。").arg(
+                root.activeProfileName()
+            )
+            wrapMode: Text.WordWrap
+            color: tokens.textPrimary
         }
     }
 
@@ -214,7 +499,7 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
-                text: qsTr("点击实物按键定位映射；普通键可直接输入任意组合键，麦克风键的语音组合键也可编辑。遥控器没有独立静音键。")
+                text: qsTr("点击实物按键定位映射；普通键可直接输入任意组合键。麦克风键的语音快捷键请在“连接”页设置。遥控器没有独立静音键。")
                 color: tokens.textSecondary
                 font.pixelSize: tokens.fontSizeSmall
             }
@@ -235,33 +520,114 @@ Item {
                     font.bold: true
                     color: tokens.textPrimary
                 }
-                Button {
-                    text: qsTr("恢复默认")
-                    onClicked: SettingsController.restoreDefaults()
+            }
+
+            Rectangle {
+                objectName: "mappingProfileBar"
+                Layout.fillWidth: true
+                implicitHeight: profileRow.implicitHeight + tokens.spacingSmall * 2
+                radius: tokens.cornerRadiusSmall
+                color: tokens.fieldBackground
+                border.color: tokens.border
+
+                RowLayout {
+                    id: profileRow
+                    objectName: "mappingProfileRow"
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingTiny
+                    spacing: tokens.spacingTiny
+
+                    ComboBox {
+                        id: mappingProfileCombo
+                        objectName: "mappingProfileCombo"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 96
+                        Layout.preferredWidth: 150
+                        model: SettingsController.mappingProfileNames
+                        currentIndex: SettingsController.activeMappingProfileIndex
+                        onActivated: SettingsController.switchMappingProfile(index)
+                        Accessible.name: qsTr("当前按键映射配置方案")
+                    }
+                    Button {
+                        objectName: "createMappingProfileButton"
+                        text: qsTr("＋ 新建方案")
+                        leftPadding: tokens.spacingSmall
+                        rightPadding: tokens.spacingSmall
+                        onClicked: profileNameDialog.openForCreate()
+                    }
+                    Button {
+                        objectName: "renameMappingProfileButton"
+                        text: qsTr("重命名…")
+                        leftPadding: tokens.spacingSmall
+                        rightPadding: tokens.spacingSmall
+                        enabled: SettingsController.canEditMappingProfile
+                        onClicked: profileNameDialog.openForRename()
+                    }
+                    Button {
+                        objectName: "deleteMappingProfileButton"
+                        text: qsTr("删除")
+                        leftPadding: tokens.spacingSmall
+                        rightPadding: tokens.spacingSmall
+                        enabled: SettingsController.canDeleteMappingProfile
+                        onClicked: deleteProfileDialog.open()
+                    }
+                    Button {
+                        // Persist the visible edits directly. If the background
+                        // bridge is missing, the controller starts it so the
+                        // next physical press uses this scheme immediately.
+                        id: saveMappingButton
+                        objectName: "saveMappingButton"
+                        text: qsTr("保存当前方案")
+                        leftPadding: tokens.spacingSmall
+                        rightPadding: tokens.spacingSmall
+                        highlighted: true
+                        enabled: SettingsController.canEditMappingProfile
+                        onClicked: SettingsController.saveMappings()
+                    }
                 }
-                Button {
-                    // XRBM-030 RETRY 1 blocker 4: without this button, a
-                    // mapping edit made on this page could only actually be
-                    // persisted by switching to "连接" and clicking "保存并
-                    // 应用" - a user who edits a mapping and just closes the
-                    // window loses it. Calls the exact same
-                    // SettingsController.saveSettings() slot the "连接" page
-                    // uses (same validation, same config.save_*() calls) -
-                    // no separate/duplicated save path.
-                    id: saveMappingButton
-                    objectName: "saveMappingButton"
-                    text: qsTr("保存映射")
-                    highlighted: true
-                    onClicked: SettingsController.saveSettings()
+            }
+
+            Label {
+                Layout.fillWidth: true
+                visible: !SettingsController.canEditMappingProfile
+                text: qsTr("系统默认方案为只读；点击“＋ 新建方案”复制后即可编辑。")
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+
+            Rectangle {
+                visible: !SettingsController.bridgeRunning
+                Layout.fillWidth: true
+                implicitHeight: bridgeStoppedRow.implicitHeight + tokens.spacingSmall * 2
+                radius: tokens.cornerRadiusSmall
+                color: tokens.surface
+                border.color: tokens.errorColor
+                border.width: 1
+
+                RowLayout {
+                    id: bridgeStoppedRow
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingSmall
+                    spacing: tokens.spacingSmall
+
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: qsTr("桥接未运行，长按、双击和普通按键都不会生效。")
+                        color: tokens.errorColor
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    Button {
+                        text: qsTr("启动桥接")
+                        highlighted: true
+                        leftPadding: tokens.spacingSmall
+                        rightPadding: tokens.spacingSmall
+                        onClicked: SettingsController.ensureBridgeRunning()
+                    }
                 }
             }
 
             // -- Status / error feedback (mirrors ConnectionPage.qml) --------
-            // "恢复默认" alone never persists anything - restoreDefaults()
-            // sets a status message saying so explicitly (see
-            // SettingsController.restoreDefaults()), so this page can never
-            // look "silently saved" when it is only showing an in-memory
-            // reset.
             Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
@@ -313,6 +679,18 @@ Item {
                         color: SettingsController.keyDetectionActive
                             ? tokens.accent : tokens.textSecondary
                         font.pixelSize: tokens.fontSizeSmall
+                    }
+
+                    Button {
+                        objectName: "editTextMenuButton"
+                        text: qsTr("快捷文本菜单")
+                        Layout.minimumWidth: implicitWidth
+                        enabled: SettingsController.canEditMappingProfile
+                        onClicked: textMenuEditor.open()
+                        ToolTip.visible: hovered
+                        ToolTip.text: enabled
+                            ? qsTr("编辑当前配置方案的快捷文本菜单")
+                            : qsTr("系统默认方案为只读，请先新建方案")
                     }
                 }
             }
@@ -412,10 +790,17 @@ Item {
                             // behavior.
                             objectName: "actionCombo_" + mappingRow.buttonId
                             visible: !mappingRow.isMic
+                            enabled: SettingsController.canEditMappingProfile
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             editable: true
                             model: SettingsController.presetActionOptions
+                            delegate: ItemDelegate {
+                                width: actionCombo.width
+                                text: modelData
+                                enabled: !root.isActionCategory(modelData)
+                                font.bold: root.isActionCategory(modelData)
+                            }
                             Accessible.name: mappingRow.displayName
                             ToolTip.visible: hovered
                             ToolTip.text: qsTr("可直接输入任意单键或组合键，例如 f8、ctrl+shift+p；输入“禁用”可关闭此键。")
@@ -463,7 +848,7 @@ Item {
                             // never fires from ComboBox's own construction-
                             // time internal writes, only from a real,
                             // post-construction edit (by typing or by
-                            // restoreDefaults()/onActionTextChanged
+                            // restoreMappingDefaults()/onActionTextChanged
                             // resetting editText, which harmlessly re-writes
                             // the model with the exact same value it already
                             // has).
@@ -478,24 +863,45 @@ Item {
                             // covers both cases (accepting Enter, or picking
                             // a dropdown item, both change editText too).
                             onAccepted: ButtonMappingModel.setActionTextAt(mappingRow.index, editText)
-                            onActivated: ButtonMappingModel.setActionTextAt(mappingRow.index, currentText)
+                            onActivated: {
+                                if (!root.isActionCategory(currentText))
+                                    ButtonMappingModel.setActionTextAt(mappingRow.index, currentText)
+                            }
                         }
 
-                        TextField {
-                            id: voiceHotkeyField
-                            objectName: "voiceHotkeyField_" + mappingRow.buttonId
+                        Label {
+                            id: voiceHotkeySummary
+                            objectName: "voiceHotkeySummary_" + mappingRow.buttonId
                             visible: mappingRow.isMic
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
-                            text: SettingsController.hotkeyText
-                            placeholderText: qsTr("免按住 ralt+space；长按 ralt")
-                            selectByMouse: true
-                            onEditingFinished: SettingsController.hotkeyText = text
-                            Accessible.name: qsTr("语音键组合键")
+                            text: qsTr("语音快捷键：") + SettingsController.hotkeyText
+                                  + qsTr("（在“连接”页设置）")
+                            color: tokens.textSecondary
+                            elide: Text.ElideRight
+                            Accessible.name: text
+                        }
+
+                        Button {
+                            objectName: "editTextAction_" + mappingRow.buttonId
+                            visible: !mappingRow.isMic
+                                && root.isTextSubmitAction(actionCombo.editText)
+                            enabled: SettingsController.canEditMappingProfile
+                            text: qsTr("文")
+                            Layout.preferredWidth: 34
+                            Layout.minimumWidth: 30
+                            onClicked: root.openTextSubmitEditor(
+                                mappingRow.index, "single_click", actionCombo.editText
+                            )
+                            ToolTip.visible: hovered
+                            ToolTip.text: qsTr("编辑要输入的文本（不按回车）")
+                            Accessible.name: qsTr("编辑") + mappingRow.displayName + qsTr("的输入文本")
                         }
 
                         Button {
                             objectName: "recordShortcut_" + mappingRow.buttonId
+                            visible: !mappingRow.isMic
+                            enabled: SettingsController.canEditMappingProfile
                             text: qsTr("录")
                             Layout.preferredWidth: 34
                             Layout.minimumWidth: 30
@@ -516,7 +922,7 @@ Item {
                         anchors.rightMargin: tokens.spacingSmall
                         anchors.bottomMargin: tokens.spacingSmall
                         visible: mappingRow.isMic
-                        text: qsTr("豆包：免按住 ralt+space；长按 ralt")
+                        text: qsTr("RC003 麦克风键需要按住才能持续传送声音")
                         color: tokens.textSecondary
                         font.pixelSize: tokens.fontSizeSmall
                         elide: Text.ElideRight
@@ -545,7 +951,14 @@ Item {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             editable: true
+                            enabled: SettingsController.canEditMappingProfile
                             model: SettingsController.presetActionOptions
+                            delegate: ItemDelegate {
+                                width: doubleActionCombo.width
+                                text: modelData
+                                enabled: !root.isActionCategory(modelData)
+                                font.bold: root.isActionCategory(modelData)
+                            }
                             ToolTip.visible: hovered
                             ToolTip.text: qsTr("双击动作；配置后等待约 0.3 秒区分单击和双击")
                             property bool _initialized: false
@@ -562,12 +975,30 @@ Item {
                             onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
                                 mappingRow.index, "double_click", editText
                             )
-                            onActivated: ButtonMappingModel.setSecondaryActionTextAt(
-                                mappingRow.index, "double_click", currentText
+                            onActivated: {
+                                if (!root.isActionCategory(currentText))
+                                    ButtonMappingModel.setSecondaryActionTextAt(
+                                        mappingRow.index, "double_click", currentText
+                                    )
+                            }
+                        }
+                        Button {
+                            objectName: "editDoubleTextAction_" + mappingRow.buttonId
+                            visible: root.isTextSubmitAction(doubleActionCombo.editText)
+                            enabled: SettingsController.canEditMappingProfile
+                            text: qsTr("文")
+                            Layout.preferredWidth: 30
+                            Layout.minimumWidth: 28
+                            onClicked: root.openTextSubmitEditor(
+                                mappingRow.index, "double_click", doubleActionCombo.editText
                             )
+                            ToolTip.visible: hovered
+                            ToolTip.text: qsTr("编辑双击时输入的文本")
+                            Accessible.name: qsTr("编辑双击输入文本")
                         }
                         Button {
                             objectName: "recordDoubleShortcut_" + mappingRow.buttonId
+                            enabled: SettingsController.canEditMappingProfile
                             text: qsTr("录")
                             Layout.preferredWidth: 30
                             Layout.minimumWidth: 28
@@ -588,7 +1019,14 @@ Item {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             editable: true
+                            enabled: SettingsController.canEditMappingProfile
                             model: SettingsController.presetActionOptions
+                            delegate: ItemDelegate {
+                                width: longActionCombo.width
+                                text: modelData
+                                enabled: !root.isActionCategory(modelData)
+                                font.bold: root.isActionCategory(modelData)
+                            }
                             ToolTip.visible: hovered
                             ToolTip.text: qsTr("长按动作；按住约 0.55 秒触发并抑制单击")
                             property bool _initialized: false
@@ -605,12 +1043,30 @@ Item {
                             onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
                                 mappingRow.index, "long_press", editText
                             )
-                            onActivated: ButtonMappingModel.setSecondaryActionTextAt(
-                                mappingRow.index, "long_press", currentText
+                            onActivated: {
+                                if (!root.isActionCategory(currentText))
+                                    ButtonMappingModel.setSecondaryActionTextAt(
+                                        mappingRow.index, "long_press", currentText
+                                    )
+                            }
+                        }
+                        Button {
+                            objectName: "editLongTextAction_" + mappingRow.buttonId
+                            visible: root.isTextSubmitAction(longActionCombo.editText)
+                            enabled: SettingsController.canEditMappingProfile
+                            text: qsTr("文")
+                            Layout.preferredWidth: 30
+                            Layout.minimumWidth: 28
+                            onClicked: root.openTextSubmitEditor(
+                                mappingRow.index, "long_press", longActionCombo.editText
                             )
+                            ToolTip.visible: hovered
+                            ToolTip.text: qsTr("编辑长按时输入的文本")
+                            Accessible.name: qsTr("编辑长按输入文本")
                         }
                         Button {
                             objectName: "recordLongShortcut_" + mappingRow.buttonId
+                            enabled: SettingsController.canEditMappingProfile
                             text: qsTr("录")
                             Layout.preferredWidth: 30
                             Layout.minimumWidth: 28

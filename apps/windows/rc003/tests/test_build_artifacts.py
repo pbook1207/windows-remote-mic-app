@@ -997,13 +997,13 @@ class UserFacingDocumentationContractTests(unittest.TestCase):
             self.assertIn("CABLE Input", text)
             self.assertIn("CABLE Output", text)
         # The direction itself, not just the two names in any order:
-        # the bridge's own voice-output setting selects CABLE Input, and
+        # the bridge's own destination setting selects CABLE Input, and
         # the recognizer/system microphone input selects CABLE Output.
-        self.assertIn("语音输出设备", self.readme_text)
-        self.assertIn("CABLE Input", self.readme_text.split("语音输出设备")[1][:80])
-        self.assertIn("语音输出设备", self.installed_readme_text)
+        self.assertIn("桥接到", self.readme_text)
+        self.assertIn("CABLE Input", self.readme_text.split("桥接到")[1][:80])
+        self.assertIn("桥接到", self.installed_readme_text)
         self.assertIn(
-            "CABLE Input", self.installed_readme_text.split("语音输出设备")[1][:120]
+            "CABLE Input", self.installed_readme_text.split("桥接到")[1][:120]
         )
 
     def test_win_h_prerequisites_are_concrete_in_both_docs(self):

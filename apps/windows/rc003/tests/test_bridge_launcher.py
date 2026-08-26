@@ -7,7 +7,7 @@ tests/test_single_instance.py's injected ``_create_mutex``/etc.).
 
 import unittest
 
-from ovb_rc003 import bridge_launcher, single_instance
+from ovb_rc003 import bridge_control_windows, bridge_launcher, single_instance
 
 
 class BuildLaunchCommandTests(unittest.TestCase):
@@ -202,6 +202,68 @@ class LaunchBridgeTests(unittest.TestCase):
 
         self.assertEqual(len(popen_calls), 1)
         self.assertTrue(popen_calls[0])  # non-empty, host-dependent contents
+
+
+class RestartBridgeTests(unittest.TestCase):
+    def test_running_bridge_is_stopped_before_replacement_is_launched(self):
+        events = []
+        states = iter([True, True, False])
+        started = bridge_launcher.LaunchResult(
+            bridge_launcher.LaunchOutcome.STARTED, ("exe",), pid=88
+        )
+
+        result = bridge_launcher.restart_bridge(
+            ["exe"],
+            _is_running=lambda: next(states),
+            _request_stop=lambda: events.append("stop") or True,
+            _sleep=lambda seconds: events.append("wait"),
+            _launch=lambda command: events.append(("launch", command)) or started,
+        )
+
+        self.assertIs(result, started)
+        self.assertEqual(events, ["stop", "wait", "wait", ("launch", ("exe",))])
+
+    def test_stopped_bridge_launches_without_sending_a_stop_request(self):
+        events = []
+        bridge_launcher.restart_bridge(
+            ["exe"],
+            _is_running=lambda: False,
+            _request_stop=lambda: events.append("stop") or True,
+            _launch=lambda command: events.append("launch")
+            or bridge_launcher.LaunchResult(
+                bridge_launcher.LaunchOutcome.STARTED, tuple(command)
+            ),
+        )
+        self.assertEqual(events, ["launch"])
+
+    def test_stop_timeout_never_launches_a_replacement(self):
+        launched = []
+        result = bridge_launcher.restart_bridge(
+            ["exe"],
+            stop_checks=2,
+            _is_running=lambda: True,
+            _request_stop=lambda: True,
+            _sleep=lambda seconds: None,
+            _launch=lambda command: launched.append(command),
+        )
+        self.assertEqual(result.outcome, bridge_launcher.LaunchOutcome.LAUNCH_FAILED)
+        self.assertIn("超时", result.error)
+        self.assertEqual(launched, [])
+
+    def test_control_failure_never_launches_a_replacement(self):
+        launched = []
+
+        def unavailable():
+            raise bridge_control_windows.BridgeControlUnavailableError("denied")
+
+        result = bridge_launcher.restart_bridge(
+            ["exe"],
+            _is_running=unavailable,
+            _launch=lambda command: launched.append(command),
+        )
+        self.assertEqual(result.outcome, bridge_launcher.LaunchOutcome.LAUNCH_FAILED)
+        self.assertIn("denied", result.error)
+        self.assertEqual(launched, [])
 
 
 if __name__ == "__main__":

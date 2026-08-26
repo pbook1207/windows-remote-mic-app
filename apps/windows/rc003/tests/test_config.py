@@ -39,7 +39,7 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
     def test_output_endpoint_defaults_to_empty_so_voice_fails_closed(self):
         self.assertEqual(config.default_config()["output_endpoint_name"], "")
 
-    def test_load_repairs_a_stale_toggle_right_alt_pair(self):
+    def test_load_preserves_a_user_selected_toggle_right_alt_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text(
@@ -47,15 +47,42 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             loaded = config.load_config(path)
-        self.assertEqual(loaded["voice_hotkey"], "ralt+space")
+        self.assertEqual(loaded["voice_trigger_mode"], "toggle")
+        self.assertEqual(loaded["voice_hotkey"], "ralt")
 
-    def test_save_repairs_a_stale_hold_right_alt_space_pair(self):
+    def test_save_preserves_a_user_selected_hold_right_alt_space_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             data = config.default_config()
             data.update({"voice_trigger_mode": "hold", "voice_hotkey": "ralt+space"})
             config.save_config(path, data)
             loaded = config.load_config(path)
+        self.assertEqual(loaded["voice_trigger_mode"], "hold")
+        self.assertEqual(loaded["voice_hotkey"], "ralt+space")
+
+    def test_save_preserves_the_typeless_right_alt_edge_tap_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            data = config.default_config()
+            data.update({"voice_trigger_mode": "typeless", "voice_hotkey": "ralt"})
+            config.save_config(path, data)
+            loaded = config.load_config(path)
+        self.assertEqual(loaded["voice_trigger_mode"], "typeless")
+        self.assertEqual(loaded["voice_hotkey"], "ralt")
+
+    def test_save_preserves_typeless_start_only_diagnostic_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            data = config.default_config()
+            data.update(
+                {
+                    "voice_trigger_mode": "typeless_start_only",
+                    "voice_hotkey": "ralt",
+                }
+            )
+            config.save_config(path, data)
+            loaded = config.load_config(path)
+        self.assertEqual(loaded["voice_trigger_mode"], "typeless_start_only")
         self.assertEqual(loaded["voice_hotkey"], "ralt")
 
     def test_load_preserves_a_user_custom_voice_shortcut(self):
@@ -68,7 +95,7 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
             loaded = config.load_config(path)
         self.assertEqual(loaded["voice_hotkey"], "win+h")
 
-    def test_load_repairs_recorded_left_ctrl_win_to_hold_mode(self):
+    def test_load_preserves_recorded_left_ctrl_win_without_inferring_a_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text(
@@ -78,10 +105,10 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             loaded = config.load_config(path)
-        self.assertEqual(loaded["voice_trigger_mode"], "hold")
-        self.assertEqual(loaded["voice_hotkey"], "ralt")
+        self.assertEqual(loaded["voice_trigger_mode"], "toggle")
+        self.assertEqual(loaded["voice_hotkey"], "lctrl+lwin")
 
-    def test_load_repairs_recorded_left_alt_to_right_alt_in_hold_mode(self):
+    def test_load_preserves_left_alt_when_the_user_selected_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text(
@@ -90,7 +117,7 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
             )
             loaded = config.load_config(path)
         self.assertEqual(loaded["voice_trigger_mode"], "hold")
-        self.assertEqual(loaded["voice_hotkey"], "ralt")
+        self.assertEqual(loaded["voice_hotkey"], "lalt")
 
 
 class SaveConfigPrivacyGuardTests(unittest.TestCase):
@@ -268,6 +295,211 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(
             loaded["bindings"]["power"],
             {"kind": "key_combo", "keys": ["ctrl", "shift", "p"]},
+        )
+
+    def test_old_text_submit_actions_migrate_to_input_without_return(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "key_bindings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "bindings": {
+                            "power": {
+                                "kind": "type_text_and_submit",
+                                "keys": [],
+                                "text": "继续",
+                            },
+                            "menu": {
+                                "kind": "type_execute_and_submit",
+                                "keys": [],
+                            },
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = config.load_key_bindings(path)
+
+        self.assertEqual(
+            loaded["bindings"]["power"],
+            {"kind": "type_text", "keys": [], "text": "继续"},
+        )
+        self.assertEqual(
+            loaded["bindings"]["menu"],
+            {"kind": "type_text", "keys": [], "text": "执行"},
+        )
+
+    def test_text_menu_items_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "key_bindings.json"
+            original = config.default_key_bindings()
+            original = config.create_mapping_profile(original, "工作方案")
+            original["text_menu_items"] = [
+                {"label": "总结", "text": "请总结上述内容", "enabled": True},
+                {"label": "继续", "text": "继续", "enabled": False},
+            ]
+            original = config.update_active_mapping_profile(original)
+            config.save_key_bindings(path, original)
+
+            loaded = config.load_key_bindings(path)
+
+        self.assertEqual(loaded["text_menu_items"], original["text_menu_items"])
+
+    def test_legacy_mapping_file_is_preserved_beside_the_system_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "key_bindings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "bindings": {
+                            "power": {"kind": "key_combo", "keys": ["f8"]}
+                        },
+                        "secondary_bindings": {},
+                        "text_menu_items": [
+                            {"label": "继续", "text": "继续", "enabled": True}
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = config.load_key_bindings(path)
+
+        self.assertEqual(loaded["active_mapping_profile_id"], "legacy_default")
+        self.assertEqual(
+            [profile["name"] for profile in loaded["mapping_profiles"]],
+            ["系统默认方案", "原有配置"],
+        )
+        self.assertEqual(
+            loaded["mapping_profiles"][1]["bindings"]["power"],
+            {"kind": "key_combo", "keys": ["f8"]},
+        )
+        self.assertEqual(
+            loaded["mapping_profiles"][1]["text_menu_items"],
+            loaded["text_menu_items"],
+        )
+
+    def test_modified_old_default_profile_is_preserved_as_original_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "key_bindings.json"
+            old = config._factory_mapping_profile_snapshot()
+            old["bindings"]["power"] = {"kind": "key_combo", "keys": ["f9"]}
+            path.write_text(
+                json.dumps(
+                    {
+                        **old,
+                        "active_mapping_profile_id": "default",
+                        "mapping_profiles": [
+                            {"id": "default", "name": "默认方案", **old}
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = config.load_key_bindings(path)
+
+        self.assertEqual(
+            [profile["name"] for profile in loaded["mapping_profiles"]],
+            ["系统默认方案", "原有配置"],
+        )
+        self.assertEqual(loaded["bindings"]["power"]["keys"], ["f9"])
+        self.assertEqual(loaded["active_mapping_profile_id"], "default")
+
+    def test_mapping_profiles_support_save_as_switch_rename_and_delete(self):
+        original = config.default_key_bindings()
+        original_power = original["bindings"]["power"]
+        original["physical_bindings"] = {"keyboard:vkey=0x70": "power"}
+        first_user = config.create_mapping_profile(original, "基础")
+        edited = json.loads(json.dumps(first_user))
+        edited["bindings"]["power"] = {"kind": "key_combo", "keys": ["f8"]}
+        edited["text_menu_items"] = [
+            {"label": "审查", "text": "请审查以上改动", "enabled": True}
+        ]
+
+        created = config.create_mapping_profile(edited, "代码审查")
+
+        self.assertEqual(
+            created["mapping_profiles"][0]["bindings"]["power"], original_power
+        )
+        self.assertEqual(
+            created["mapping_profiles"][1]["bindings"]["power"], original_power
+        )
+        self.assertEqual(created["bindings"]["power"]["keys"], ["f8"])
+        self.assertEqual(
+            created["physical_bindings"], {"keyboard:vkey=0x70": "power"}
+        )
+        new_id = created["active_mapping_profile_id"]
+        renamed = config.rename_mapping_profile(created, new_id, "Vibe Coding")
+        self.assertEqual(
+            [profile["name"] for profile in config.mapping_profile_summaries(renamed)],
+            ["系统默认方案", "基础", "Vibe Coding"],
+        )
+
+        switched = config.activate_mapping_profile(
+            renamed, config.SYSTEM_MAPPING_PROFILE_ID
+        )
+        self.assertEqual(switched["bindings"]["power"], original_power)
+        self.assertEqual(
+            switched["text_menu_items"], original["text_menu_items"]
+        )
+        self.assertEqual(
+            switched["physical_bindings"], {"keyboard:vkey=0x70": "power"}
+        )
+
+        deleted = config.delete_mapping_profile(switched, new_id)
+        self.assertEqual(
+            [profile["name"] for profile in config.mapping_profile_summaries(deleted)],
+            ["系统默认方案", "基础"],
+        )
+
+    def test_system_profile_cannot_be_duplicated_renamed_or_deleted(self):
+        bindings = config.default_key_bindings()
+        with self.assertRaisesRegex(config.MappingProfileError, "同名"):
+            config.create_mapping_profile(bindings, " 系统默认方案 ")
+        with self.assertRaisesRegex(config.MappingProfileError, "不能重命名"):
+            config.rename_mapping_profile(
+                bindings, config.SYSTEM_MAPPING_PROFILE_ID, "其他名称"
+            )
+        with self.assertRaisesRegex(config.MappingProfileError, "不能删除"):
+            config.delete_mapping_profile(
+                bindings, config.SYSTEM_MAPPING_PROFILE_ID
+            )
+
+    def test_system_profile_content_cannot_be_overwritten(self):
+        bindings = config.default_key_bindings()
+        bindings["bindings"]["power"] = {
+            "kind": "key_combo",
+            "keys": ["f8"],
+        }
+        bindings["mapping_profiles"][0]["bindings"]["power"] = {
+            "kind": "key_combo",
+            "keys": ["f9"],
+        }
+
+        normalized = config.update_active_mapping_profile(bindings)
+
+        expected = config.default_key_bindings()["bindings"]["power"]
+        self.assertEqual(normalized["bindings"]["power"], expected)
+        self.assertEqual(
+            normalized["mapping_profiles"][0]["bindings"]["power"], expected
+        )
+
+    def test_last_user_profile_can_be_deleted_and_falls_back_to_system_default(self):
+        bindings = config.create_mapping_profile(
+            config.default_key_bindings(), "临时方案"
+        )
+        user_id = bindings["active_mapping_profile_id"]
+        deleted = config.delete_mapping_profile(bindings, user_id)
+
+        self.assertEqual(deleted["active_mapping_profile_id"], "system_default")
+        self.assertEqual(
+            [profile["name"] for profile in config.mapping_profile_summaries(deleted)],
+            ["系统默认方案"],
         )
 
 

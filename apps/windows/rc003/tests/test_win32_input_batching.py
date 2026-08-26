@@ -26,6 +26,68 @@ class RecordingSender:
         return len(events)
 
 
+class RecordingTextSender:
+    def __init__(self, sent_count=None, include_return=False):
+        self.sent_count = sent_count
+        self.include_return = include_return
+        self.calls = []
+
+    def __call__(self, text):
+        self.calls.append(text)
+        if self.sent_count is not None:
+            return self.sent_count
+        return len(win32_input._utf16_code_units(text)) * 2 + (
+            2 if self.include_return else 0
+        )
+
+
+class SendTextTests(unittest.TestCase):
+    def test_unicode_text_is_sent_without_an_enter_event(self):
+        sender = RecordingTextSender(include_return=False)
+
+        win32_input.send_text("执行", _sender=sender)
+
+        self.assertEqual(sender.calls, ["执行"])
+        array, _input_type = win32_input._build_text_array("执行")
+        self.assertEqual(len(array), 4)
+        self.assertTrue(all(entry.union.ki.wVk == 0 for entry in array))
+        self.assertEqual(array[0].union.ki.wScan, ord("执"))
+        self.assertEqual(
+            array[0].union.ki.dwFlags, win32_input._KEYEVENTF_UNICODE
+        )
+        self.assertEqual(
+            array[1].union.ki.dwFlags,
+            win32_input._KEYEVENTF_UNICODE | win32_input._KEYEVENTF_KEYUP,
+        )
+
+    def test_partial_text_delivery_is_reported(self):
+        sender = RecordingTextSender(sent_count=3)
+
+        with self.assertRaises(OSError):
+            win32_input.send_text("执行", _sender=sender)
+
+
+class MouseWheelTests(unittest.TestCase):
+    def test_wheel_up_and_down_send_one_signed_detent(self):
+        deltas = []
+
+        win32_input.send_mouse_wheel_up(_sender=lambda delta: deltas.append(delta) or 1)
+        win32_input.send_mouse_wheel_down(_sender=lambda delta: deltas.append(delta) or 1)
+
+        self.assertEqual(deltas, [120, -120])
+
+    def test_mouse_input_array_preserves_negative_delta_as_dword(self):
+        array, _input_type = win32_input._build_mouse_wheel_array(-120)
+
+        self.assertEqual(array[0].type, win32_input._INPUT_MOUSE)
+        self.assertEqual(array[0].union.mi.dwFlags, win32_input._MOUSEEVENTF_WHEEL)
+        self.assertEqual(array[0].union.mi.mouseData, 0xFFFFFF88)
+
+    def test_partial_mouse_wheel_delivery_is_reported(self):
+        with self.assertRaises(OSError):
+            win32_input.send_mouse_wheel_up(_sender=lambda _delta: 0)
+
+
 class RaiseOnceThenRecordSender:
     """A fake RawSender simulating XRBM-020's exact scenario: the initial
     batch call raises a generic exception (delivery is now unknown, not
@@ -360,6 +422,34 @@ class VoiceKeyComboTests(unittest.TestCase):
 
         with self.assertRaises(win32_input.Win32InputUnavailableError):
             win32_input.send_voice_key_combo_down(("ralt",), _sender=unavailable_sender)
+
+
+class TypelessKeyComboTests(unittest.TestCase):
+    def test_tap_uses_two_sendinput_batches_with_a_short_fixed_hold(self):
+        sender = RecordingSender()
+
+        with mock.patch.object(win32_input.time, "sleep") as sleep:
+            win32_input.send_typeless_key_combo_tap(("ralt",), _sender=sender)
+
+        vk = win32_input.win32_keys.VK_CODES["ralt"]
+        self.assertEqual(sender.calls, [[(vk, False)], [(vk, True)]])
+        sleep.assert_called_once_with(win32_input._TYPELESS_TAP_HOLD_SECONDS)
+
+    def test_tap_release_failure_attempts_an_additional_release(self):
+        vk = win32_input.win32_keys.VK_CODES["ralt"]
+        calls = []
+
+        def sender(events):
+            calls.append(list(events))
+            if len(calls) == 2:
+                raise RuntimeError("simulated release failure")
+            return len(events)
+
+        with mock.patch.object(win32_input.time, "sleep"), self.assertRaises(OSError):
+            win32_input.send_typeless_key_combo_tap(("ralt",), _sender=sender)
+
+        self.assertEqual(calls[0], [(vk, False)])
+        self.assertTrue(all(call == [(vk, True)] for call in calls[1:]))
 
 
 class VolumeTests(unittest.TestCase):

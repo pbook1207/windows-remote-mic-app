@@ -43,15 +43,13 @@ _ELEVATION_MARKERS = (
 
 _FORBIDDEN_BINARY_SUFFIXES = (".exe", ".dll", ".pyd", ".zip", ".xz")
 
-# The SOLE, disclosed exception (XRBM-031): vb_cable_bundle.py launches the
-# THIRD-PARTY vendor's own VB-CABLE setup UI with Windows' "runas"/UAC verb,
-# only from a slot reached by an explicit user click plus a separate
-# explicit confirmation - never to elevate this application's own process,
-# and never for anything but that one vendor-controlled launch. Every other
-# module in this package must stay elevation-free; see
-# test_elevation_exception_is_scoped_to_the_vendor_vb_cable_launch_only
-# below, which proves the exemption is not a blank check.
-_ELEVATION_MARKER_EXEMPT_FILENAMES = frozenset({"vb_cable_bundle.py"})
+# Two disclosed, narrow elevation boundaries: the user-confirmed VB-CABLE
+# vendor installer and the RC003 HID tap helper. The latter is a separate
+# short-lived child which revalidates HostPid, process name and Gadget hash;
+# the long-running bridge remains at normal user integrity.
+_ELEVATION_MARKER_EXEMPT_FILENAMES = frozenset(
+    {"vb_cable_bundle.py", "frida_hid_tap_injector.py"}
+)
 
 # vb_cable_bundle.py/windows_diagnostics.py/qt_settings_app.py are the three
 # SANCTIONED, reviewed modules for the explicit vendor-launch/read-only-
@@ -122,6 +120,17 @@ class NoElevationOrAutoDriverTests(unittest.TestCase):
         self.assertNotIn("PrivilegesRequired=admin", text)
         self.assertNotIn("RequireAdministrator", text)
         self.assertIn('os.startfile(path, "runas"', text)
+
+    def test_hid_tap_elevation_is_scoped_to_the_verified_hidden_helper(self):
+        path = _PACKAGE_ROOT / "frida_hid_tap_injector.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('info.lpVerb = "runas"', text)
+        self.assertIn("--rc003-hid-injector", text)
+        self.assertIn("find_rc003_hidogatt_host_pid", text)
+        self.assertIn('_target_process_name(pid) != "wudfhost.exe"', text)
+        self.assertIn("GADGET_DLL_SHA256", text)
+        self.assertNotIn("PrivilegesRequired=admin", text)
+        self.assertNotIn("RequireAdministrator", text)
 
     def test_no_vbcable_install_function_exists_outside_the_sanctioned_module(self):
         offenders = []
@@ -222,16 +231,25 @@ class ConfigPrivacyKeysNotHardcodedElsewhereTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"forbidden identity key literal found: {offenders}")
 
 
-class NoAutoStartOnLoginTests(unittest.TestCase):
-    def test_source_never_references_startup_folder_or_run_key(self):
+class AutostartBoundaryTests(unittest.TestCase):
+    def test_run_key_is_scoped_to_the_user_controlled_autostart_module(self):
         offenders = []
-        markers = ("CurrentVersion\\\\Run", "userstartup", "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        markers = ("CurrentVersion\\Run", "userstartup", "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
         for path in _PY_FILES:
+            if path.name == "autostart_windows.py":
+                continue
             text = path.read_text(encoding="utf-8")
             for marker in markers:
                 if marker in text:
                     offenders.append((str(path), marker))
         self.assertEqual(offenders, [], f"autostart marker found: {offenders}")
+
+        autostart_text = (_PACKAGE_ROOT / "autostart_windows.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CurrentVersion\\Run", autostart_text)
+        self.assertIn("bridge_launcher.build_launch_command", autostart_text)
+        self.assertNotIn("runas", autostart_text)
 
 
 if __name__ == "__main__":

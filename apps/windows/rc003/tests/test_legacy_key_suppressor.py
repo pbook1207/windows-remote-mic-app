@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from unittest import mock
 
 from ovb_rc003 import legacy_key_suppressor_windows as suppressor
 
@@ -96,6 +97,74 @@ class LegacyKeySuppressorDecisionTests(unittest.TestCase):
         gate.arm_key_event(0x74, 0x3F, False, True)
         self.assertFalse(gate.consume_armed_key_event(0x74, 0x3F, False, True))
 
+    def test_dedicated_f5_voice_path_never_waits_for_an_impossible_arm(self):
+        gate = suppressor.LegacyKeySuppressor({0x74}, consume_wait_seconds=10.0)
+        with mock.patch.object(
+            suppressor.time,
+            "monotonic",
+            side_effect=AssertionError("F5 must return before the wait path"),
+        ):
+            self.assertFalse(
+                gate.consume_armed_key_event(0x74, 0x3F, False, True)
+            )
+
+    def test_direct_hold_consumes_initial_and_repeated_downs_until_keyup(self):
+        gate = suppressor.LegacyKeySuppressor({0x74})
+        gate.track_direct_key_hold(0x0D, 0x1C, False, True)
+        gate.arm_key_event(0x0D, 0x1C, False, True)
+
+        self.assertTrue(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+        )
+        for _ in range(8):
+            self.assertTrue(
+                gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+            )
+        self.assertTrue(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, False)
+        )
+        self.assertFalse(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+        )
+        # The direct-hold path removed the initial armed token as stale.
+        self.assertFalse(
+            gate.consume_armed_key_event(
+                0x0D, 0x1C, False, True, wait_seconds=0.0
+            )
+        )
+
+    def test_tap_release_keeps_queued_repeats_blocked_until_keyup(self):
+        gate = suppressor.LegacyKeySuppressor({0x74})
+        gate.track_direct_key_hold(0x0D, 0x1C, False, True)
+        gate.track_direct_key_hold(0x0D, 0x1C, False, False)
+
+        self.assertTrue(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+        )
+        self.assertTrue(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, False)
+        )
+        self.assertFalse(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+        )
+
+    def test_same_key_outside_direct_hold_is_not_consumed(self):
+        gate = suppressor.LegacyKeySuppressor({0x74})
+        self.assertFalse(
+            gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+        )
+
+    def test_direct_hold_timeout_fails_open(self):
+        gate = suppressor.LegacyKeySuppressor({0x74})
+        with mock.patch.object(suppressor.time, "monotonic", return_value=10.0):
+            gate.track_direct_key_hold(
+                0x0D, 0x1C, False, True, hold_lifetime_seconds=1.0
+            )
+        with mock.patch.object(suppressor.time, "monotonic", return_value=11.1):
+            self.assertFalse(
+                gate.consume_direct_key_hold_event(0x0D, 0x1C, False, True)
+            )
+
 
 class LegacyKeySuppressorRaceTests(unittest.TestCase):
     """The low-level hook and the Raw Input thread race for the same physical
@@ -190,6 +259,38 @@ class LegacyKeySuppressorLifecycleTests(unittest.TestCase):
         finally:
             release.set()
             gate.stop()
+
+    def test_swallowed_key_callback_runs_on_worker_without_blocking_enqueue(self):
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        hook_release = threading.Event()
+        events = []
+
+        def callback(vk_code, is_pressed):
+            events.append((vk_code, is_pressed))
+            callback_started.set()
+            release_callback.wait(timeout=2.0)
+
+        gate = suppressor.LegacyKeySuppressor({0x74}, on_key_event=callback)
+
+        def fake_run():
+            gate._ready_event.set()
+            hook_release.wait(timeout=2.0)
+
+        try:
+            gate.start(_run_target=fake_run)
+            gate._enqueue_key_event(0x74, True)
+            self.assertTrue(callback_started.wait(timeout=1.0))
+
+            started_at = time.monotonic()
+            gate._enqueue_key_event(0x74, False)
+            self.assertLess(time.monotonic() - started_at, 0.05)
+        finally:
+            release_callback.set()
+            hook_release.set()
+            gate.stop()
+
+        self.assertEqual(events, [(0x74, True), (0x74, False)])
 
 
 if __name__ == "__main__":

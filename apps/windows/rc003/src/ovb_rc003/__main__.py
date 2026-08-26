@@ -86,12 +86,15 @@ def _dry_run() -> int:
 
     from . import (  # noqa: F401
         app,
+        audio_capture_activity_windows,
         atvv_protocol,
         atvv_session,
         audio_output,
         audio_playback,
         ble_transport_winrt,
+        bridge_control_windows,
         bridge_launcher,
+        button_detection_relay,
         config,
         connection_supervisor,
         device_catalog,
@@ -109,6 +112,7 @@ def _dry_run() -> int:
         settings_ui,
         shell_targets,
         single_instance,
+        text_menu_overlay,
         voice_controller,
         win32_input,
         win32_keys,
@@ -208,6 +212,12 @@ def main() -> None:
 
         flag_index = args.index("--rc003-hid-injector")
         raise SystemExit(frida_compat.injector_main(args[flag_index + 1 :]))
+    if "--text-menu-overlay" in args:
+        # Hidden child-process entry point for the no-focus Qt Quick text
+        # menu. It must never reach settings or bridge startup.
+        from . import text_menu_overlay
+
+        raise SystemExit(text_menu_overlay.run_qt_text_menu_overlay())
     if "--bridge" in args:
         _run_bridge()
         return

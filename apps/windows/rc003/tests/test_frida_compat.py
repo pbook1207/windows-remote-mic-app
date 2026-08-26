@@ -2,8 +2,10 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ovb_rc003 import frida_compat
+from ovb_rc003 import frida_hid_tap_injector
 
 
 class AssetDescriptorTests(unittest.TestCase):
@@ -89,6 +91,16 @@ class ReportTapTests(unittest.TestCase):
             ],
         )
 
+    def test_only_verified_report_shape_counts_as_io(self):
+        tap = frida_compat.RC003HidReportTap(
+            lambda _report_id, _payload: None,
+            enabled=False,
+        )
+        self.assertFalse(tap._handle_ioctl_output(b"wrong"))
+        self.assertTrue(
+            tap._handle_ioctl_output(bytes.fromhex("010000f10000000000"))
+        )
+
     def test_releases_active_usages_when_stopped(self):
         reports = []
         tap = frida_compat.RC003HidReportTap(
@@ -125,6 +137,103 @@ class ReportTapTests(unittest.TestCase):
             layer = frida_compat.BackKeyCompatLayer(gadget_path=path, asset=asset)
             self.assertTrue(layer.available)
             self.assertEqual(layer.status, "ready_gadget_verified")
+
+
+class ElevatedInjectorLaunchTests(unittest.TestCase):
+    def test_source_command_uses_hidden_module_entrypoint(self):
+        executable, parameters, directory = frida_hid_tap_injector.injector_command(42)
+        self.assertTrue(executable.lower().endswith("python.exe"))
+        self.assertIn("-m ovb_rc003", parameters)
+        self.assertIn("--rc003-hid-injector --pid 42", parameters)
+        self.assertEqual(directory, str(Path(executable).parent))
+
+    def test_frozen_command_reuses_packaged_executable(self):
+        with mock.patch.object(
+            frida_hid_tap_injector.sys, "frozen", True, create=True
+        ):
+            _executable, parameters, _directory = (
+                frida_hid_tap_injector.injector_command(43)
+            )
+        self.assertNotIn("-m ovb_rc003", parameters)
+        self.assertEqual(parameters, "--rc003-hid-injector --pid 43")
+
+    def test_launch_waits_for_successful_helper_exit(self):
+        calls = []
+
+        def run_elevated(executable, parameters, directory, timeout_ms):
+            calls.append((executable, parameters, directory, timeout_ms))
+            return 0
+
+        self.assertTrue(
+            frida_hid_tap_injector.launch_elevated_injector(
+                44, timeout_ms=1234, _run_elevated=run_elevated
+            )
+        )
+        self.assertEqual(calls[0][3], 1234)
+        self.assertIn("--pid 44", calls[0][1])
+
+    def test_nonzero_helper_exit_is_not_reported_as_injected(self):
+        with self.assertRaisesRegex(RuntimeError, "exit code 5"):
+            frida_hid_tap_injector.launch_elevated_injector(
+                45,
+                _run_elevated=lambda *_args: 5,
+            )
+
+    def test_rejects_invalid_pid_before_uac(self):
+        with self.assertRaises(ValueError):
+            frida_hid_tap_injector.injector_command(0)
+
+    def test_debug_privilege_precedes_protected_process_name_query(self):
+        events = []
+
+        with (
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "find_rc003_hidogatt_host_pid",
+                return_value=46,
+            ),
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "enable_debug_privilege",
+                side_effect=lambda: events.append("debug_privilege"),
+            ),
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "_target_process_name",
+                side_effect=lambda _pid: events.append("process_name") or "wudfhost.exe",
+            ),
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "prepare_secure_runtime",
+                return_value=Path("verified-gadget.dll"),
+            ),
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "sha256_file",
+                return_value=frida_hid_tap_injector.GADGET_DLL_SHA256,
+            ),
+            mock.patch.object(frida_hid_tap_injector, "inject_library"),
+        ):
+            frida_hid_tap_injector.inject_current_process(46)
+
+        self.assertEqual(events, ["debug_privilege", "process_name"])
+
+    def test_hidden_helper_logs_failure_instead_of_raising_gui_exception(self):
+        logger = mock.Mock()
+        with (
+            mock.patch.object(
+                frida_hid_tap_injector,
+                "inject_current_process",
+                side_effect=PermissionError("denied"),
+            ),
+            mock.patch.object(
+                frida_hid_tap_injector.logging_setup,
+                "get_logger",
+                return_value=logger,
+            ),
+        ):
+            self.assertEqual(frida_hid_tap_injector.main(["--pid", "46"]), 1)
+        logger.exception.assert_called_once()
 
 
 if __name__ == "__main__":

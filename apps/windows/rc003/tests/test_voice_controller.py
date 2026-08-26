@@ -106,6 +106,21 @@ class HoldModeTests(unittest.TestCase):
         self.assertIsNone(controller.reset())
 
 
+class TypelessModeTests(unittest.TestCase):
+    def test_press_and_audio_stop_each_issue_one_completed_tap(self):
+        controller = VoiceController(VoiceTriggerMode.TYPELESS)
+        self.assertEqual(controller.on_mic_button_pressed(), VoiceHostAction.TAP)
+        self.assertTrue(controller.active)
+        self.assertEqual(controller.on_audio_stopped(), VoiceHostAction.TAP)
+        self.assertFalse(controller.active)
+
+    def test_typeless_mode_never_holds_right_alt_down(self):
+        controller = VoiceController(VoiceTriggerMode.TYPELESS)
+        controller.on_mic_button_pressed()
+        self.assertFalse(controller.holding)
+        self.assertEqual(controller.reset(), VoiceHostAction.TAP)
+
+
 class ResetTests(unittest.TestCase):
     def test_reset_releases_a_held_key_provably(self):
         controller = VoiceController(VoiceTriggerMode.HOLD)

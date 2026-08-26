@@ -41,10 +41,14 @@ from typing import Callable, List, Optional, Sequence, Tuple
 from . import win32_keys
 from .legacy_key_suppressor_windows import VOICE_EVENT_EXTRA_INFO
 
+_INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_EXTENDEDKEY = 0x0001
+_KEYEVENTF_UNICODE = 0x0004
 _KEYEVENTF_SCANCODE = 0x0008
+_MOUSEEVENTF_WHEEL = 0x0800
+_WHEEL_DELTA = 120
 
 # Real x64 Win32 ``INPUT`` struct shape (fixed after XRBM-014 review round 2
 # P1 #1: the union previously declared only ``KEYBDINPUT``, so
@@ -137,6 +141,10 @@ _PHYSICAL_SCAN_CODES = {
 }
 
 RawSender = Callable[[Sequence[Tuple[int, bool]]], int]
+TextSender = Callable[[str], int]
+MouseWheelSender = Callable[[int], int]
+
+_TYPELESS_TAP_HOLD_SECONDS = 0.05
 VoiceSender = Callable[[int, bool], None]
 
 _voice_backend: Optional[str] = None
@@ -217,6 +225,119 @@ def _real_send_input_batch(events: Sequence[Tuple[int, bool]]) -> int:
     # only correct for a pointer to a single instance, never to an array.
     sent = user32.SendInput(len(events), array, ctypes.sizeof(input_type))
     return int(sent)
+
+
+def _utf16_code_units(text: str) -> List[int]:
+    encoded = text.encode("utf-16-le")
+    return [
+        int.from_bytes(encoded[index : index + 2], "little")
+        for index in range(0, len(encoded), 2)
+    ]
+
+
+def _build_text_array(text: str):
+    """Build only Unicode text events, with no implicit submit key."""
+
+    inputs = []
+    for code_unit in _utf16_code_units(text):
+        for key_up in (False, True):
+            flags = _KEYEVENTF_UNICODE
+            if key_up:
+                flags |= _KEYEVENTF_KEYUP
+            keyboard = KEYBDINPUT(
+                wVk=0,
+                wScan=code_unit,
+                dwFlags=flags,
+                time=0,
+                dwExtraInfo=0,
+            )
+            inputs.append(
+                INPUT(type=_INPUT_KEYBOARD, union=_INPUT_UNION(ki=keyboard))
+            )
+    array = (INPUT * len(inputs))(*inputs)
+    return array, INPUT
+
+
+def _real_send_text(text: str) -> int:
+    _require_windows()
+    array, input_type = _build_text_array(text)
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    user32.SendInput.argtypes = (
+        wintypes.UINT,
+        ctypes.POINTER(input_type),
+        ctypes.c_int,
+    )
+    user32.SendInput.restype = wintypes.UINT
+    return int(user32.SendInput(len(array), array, ctypes.sizeof(input_type)))
+
+
+def _build_mouse_wheel_array(delta: int):
+    mouse = MOUSEINPUT(
+        dx=0,
+        dy=0,
+        mouseData=ctypes.c_uint32(int(delta)).value,
+        dwFlags=_MOUSEEVENTF_WHEEL,
+        time=0,
+        dwExtraInfo=0,
+    )
+    array = (INPUT * 1)(INPUT(type=_INPUT_MOUSE, union=_INPUT_UNION(mi=mouse)))
+    return array, INPUT
+
+
+def _real_send_mouse_wheel(delta: int) -> int:
+    _require_windows()
+    array, input_type = _build_mouse_wheel_array(delta)
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    user32.SendInput.argtypes = (
+        wintypes.UINT,
+        ctypes.POINTER(input_type),
+        ctypes.c_int,
+    )
+    user32.SendInput.restype = wintypes.UINT
+    return int(user32.SendInput(1, array, ctypes.sizeof(input_type)))
+
+
+def send_mouse_wheel(delta: int, *, _sender: Optional[MouseWheelSender] = None) -> None:
+    """Emit one real vertical wheel notch at the current mouse location."""
+
+    if not delta:
+        raise ValueError("mouse wheel delta must not be zero")
+    sender = _sender or _real_send_mouse_wheel
+    try:
+        sent = sender(int(delta))
+    except Win32InputUnavailableError:
+        raise
+    except Exception as exc:
+        raise OSError(f"mouse wheel input failed: {exc}") from exc
+    if sent != 1:
+        raise OSError(f"SendInput delivered only {sent}/1 mouse wheel events")
+
+
+def send_mouse_wheel_up(*, _sender: Optional[MouseWheelSender] = None) -> None:
+    send_mouse_wheel(_WHEEL_DELTA, _sender=_sender)
+
+
+def send_mouse_wheel_down(*, _sender: Optional[MouseWheelSender] = None) -> None:
+    send_mouse_wheel(-_WHEEL_DELTA, _sender=_sender)
+
+
+def send_text(text: str, *, _sender: Optional[TextSender] = None) -> None:
+    """Type Unicode text into the focused control without pressing Enter."""
+
+    if not text:
+        raise ValueError("text must not be empty")
+    sender = _sender or _real_send_text
+    expected = len(_utf16_code_units(text)) * 2
+    try:
+        sent = sender(text)
+    except Win32InputUnavailableError:
+        raise
+    except Exception as exc:
+        raise OSError(f"text input failed: {exc}") from exc
+    if sent != expected:
+        raise OSError(
+            f"SendInput delivered only {sent}/{expected} events for text input"
+        )
 
 
 def _best_effort_release(vk_codes: Sequence[int], sender: RawSender) -> None:
@@ -360,6 +481,32 @@ def send_key_combo_tap(
         raise OSError(
             f"SendInput delivered only {sent}/{len(events)} events for a key tap; rolled back"
         )
+
+
+def send_typeless_key_combo_tap(
+    tokens: Sequence[str], *, _sender: Optional[RawSender] = None
+) -> None:
+    """Send one short, completed Typeless toggle through ordinary SendInput.
+
+    Typeless accepts injected keyboard input (the previously working
+    AutoHotkey bridge used exactly that kind of input), so it must not use
+    the Doubao-only path below which rewrites two separate ``keybd_event``
+    edges to look physical.  A zero-duration down+up batch is occasionally
+    coalesced or ignored by Typeless, especially for the closing/submission
+    toggle. Hold the ordinary injected key for one fixed 50 ms window, then
+    release it unconditionally. This duration never follows the user's
+    physical hold, so it cannot recreate the old held-Right-Alt behavior.
+    """
+
+    sender = _sender or _real_send_input_batch
+    vk_codes = win32_keys.resolve_vk_codes(tokens)
+    send_key_combo_down(tokens, _sender=sender)
+    try:
+        time.sleep(_TYPELESS_TAP_HOLD_SECONDS)
+        send_key_combo_up(tokens, _sender=sender)
+    except Exception:
+        _best_effort_release(list(reversed(vk_codes)), sender)
+        raise
 
 
 def _real_keybd_event(vk: int, key_up: bool) -> None:
@@ -545,3 +692,59 @@ def send_volume_mute(*, _sender: Optional[RawSender] = None) -> None:
 
 def send_play_pause(*, _sender: Optional[RawSender] = None) -> None:
     _send_semantic_tap(("media_play_pause",), _sender=_sender)
+
+
+def send_page_up(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("page_up",), _sender=_sender)
+
+
+def send_page_down(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("page_down",), _sender=_sender)
+
+
+def send_virtual_desktop_left(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "ctrl", "left"), _sender=_sender)
+
+
+def send_virtual_desktop_right(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "ctrl", "right"), _sender=_sender)
+
+
+def send_task_view(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "tab"), _sender=_sender)
+
+
+def send_clipboard_history(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "v"), _sender=_sender)
+
+
+def send_previous_tab(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("ctrl", "shift", "tab"), _sender=_sender)
+
+
+def send_next_tab(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("ctrl", "tab"), _sender=_sender)
+
+
+def send_browser_back(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("browser_back",), _sender=_sender)
+
+
+def send_browser_forward(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("browser_forward",), _sender=_sender)
+
+
+def send_snap_window_left(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "left"), _sender=_sender)
+
+
+def send_snap_window_right(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "right"), _sender=_sender)
+
+
+def send_maximize_window(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "up"), _sender=_sender)
+
+
+def send_restore_minimize_window(*, _sender: Optional[RawSender] = None) -> None:
+    _send_semantic_tap(("win", "down"), _sender=_sender)

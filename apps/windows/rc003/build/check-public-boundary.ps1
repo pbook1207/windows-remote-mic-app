@@ -108,9 +108,12 @@ $brandingCheckExemptRelativePaths = @(
     "tests/test_boundary_scan_replay.py",
     "build/check-public-boundary.ps1",
     "installer/readme-rc003.txt",
-    # XRBM-031: the SOLE production-source exemption in this list, and only
-    # for the elevation category - src/ovb_rc003/vb_cable_bundle.py
-    # legitimately requests Windows' own "runas"/UAC verb to launch the
+    # Installer writes no startup value; this source entry only records
+    # uninstall cleanup for the value the user may create from Settings.
+    "installer/RemoteMicRC003Setup.iss",
+    # Narrow production-source exemptions, only for the elevation category:
+    # src/ovb_rc003/vb_cable_bundle.py legitimately requests Windows' own
+    # "runas"/UAC verb to launch the
     # THIRD-PARTY VB-CABLE vendor's own setup UI (never to elevate this
     # application itself, and only from an explicit user click), which is
     # otherwise forbidden everywhere else in this source tree. See
@@ -122,6 +125,13 @@ $brandingCheckExemptRelativePaths = @(
     # that the elevation reference is exactly the one disclosed vendor-launch
     # call, not a self-elevation of this project's own process.
     "src/ovb_rc003/vb_cable_bundle.py",
+    # frida_hid_tap_injector.py uses the same OS-owned UAC boundary for one
+    # hidden helper. The elevated child re-validates the RC003 HostPid,
+    # WUDFHost.exe name and pinned Gadget DLL hash before injection.
+    "src/ovb_rc003/frida_hid_tap_injector.py",
+    # The only sanctioned autostart boundary: an explicit user-controlled
+    # HKCU Startup Apps toggle that launches --bridge without elevation.
+    "src/ovb_rc003/autostart_windows.py",
     # README.md/ATTRIBUTION.md document this same disclosed "runas"/UAC
     # vendor-launch mechanism in prose - the word itself is documentation,
     # not a directive.
