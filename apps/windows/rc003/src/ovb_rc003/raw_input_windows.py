@@ -3,7 +3,7 @@
 Replaces the earlier hidapi-based adapter (removed after XRBM-014 review
 RETRY P1 #5: opening the BLE HID-over-GATT collection directly with hidapi
 does not match how the upstream reference project actually reads ordinary
-RC003 buttons on Windows, and this candidate must not claim "hidapi reads
+RC003 buttons on Windows, and this implementation must not claim "hidapi reads
 all 12 keys" without evidence). This module instead uses the standard
 Win32 Raw Input API (``RegisterRawInputDevices``/``WM_INPUT``), which is
 the mechanism the cited upstream project's own ``raw_input_bridge.py`` is
@@ -18,8 +18,9 @@ Raw-Input-visible device path and ``hid_identity.select_single_device_path``
 fails closed (raises) if zero or more than one match - this replaces the
 previous "return the first match" behavior.
 
-HONEST, DISCLOSED UNCERTAINTY (not something this candidate claims to have
-proven - see this package's top-level README.md "Known gaps" section):
+ENVIRONMENT-SPECIFIC FALLBACK DETAILS (the combined 0.2.0 button pipeline was
+accepted on real hardware, but a particular Raw Input collection shape can
+still vary by Windows and Bluetooth adapter):
 
 Windows delivers Raw Input events in two shapes, and which shape a given
 BLE HID-over-GATT collection actually produces for THIS device has not been
@@ -40,8 +41,8 @@ verified against real hardware:
   ``hid_identity.decode_active_usages``. Windows only takes this path for
   usage pages it does not have a specific input-class driver for. Whether
   the RC003's BLE HID collection is exposed this way at all - and, if so,
-  under which registered usage page - is unverified; this path is kept as
-  defense-in-depth and does no harm if it never fires.
+  under which registered usage page - varies by environment; this path is
+  kept as defense-in-depth and does no harm if it never fires.
 
 Importing this module never fails on a machine without the Win32 APIs
 available; only starting the listener does, with a clear error.

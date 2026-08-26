@@ -16,6 +16,9 @@ _REQUIREMENTS_PATH = _RC003_ROOT / "requirements.txt"
 _ISS_PATH = _RC003_ROOT / "installer" / "RemoteMicRC003Setup.iss"
 _CI_PATH = _REPO_ROOT / ".github" / "workflows" / "windows-rc003-ci.yml"
 _PACKAGE_MAIN_PATH = _RC003_ROOT / "src" / "ovb_rc003" / "__main__.py"
+_PACKAGE_INIT_PATH = _RC003_ROOT / "src" / "ovb_rc003" / "__init__.py"
+_PYPROJECT_PATH = _RC003_ROOT / "pyproject.toml"
+_CHANGELOG_PATH = _RC003_ROOT / "CHANGELOG.md"
 _LAUNCHER_PATH = _RC003_ROOT / "src" / "launcher.py"
 _BUILD_CANDIDATE_PATH = _RC003_ROOT / "build" / "build-candidate.ps1"
 _FRIDA_FETCH_PATH = _RC003_ROOT / "build" / "fetch-frida-gadget.ps1"
@@ -23,6 +26,51 @@ _README_PATH = _RC003_ROOT / "README.md"
 _INSTALLED_README_PATH = _RC003_ROOT / "installer" / "readme-rc003.txt"
 _ROOT_README_PATH = _REPO_ROOT / "README.md"
 _THIRD_PARTY_NOTICES_PATH = _REPO_ROOT / "THIRD_PARTY_NOTICES.md"
+
+
+class VersionConsistencyTests(unittest.TestCase):
+    """One release number must drive the app, installer, package and docs."""
+
+    def setUp(self):
+        self.iss_text = _ISS_PATH.read_text(encoding="utf-8")
+        self.pyproject_text = _PYPROJECT_PATH.read_text(encoding="utf-8")
+        self.package_init_text = _PACKAGE_INIT_PATH.read_text(encoding="utf-8")
+        self.changelog_text = _CHANGELOG_PATH.read_text(encoding="utf-8")
+        self.readmes = (
+            _ROOT_README_PATH.read_text(encoding="utf-8"),
+            _README_PATH.read_text(encoding="utf-8"),
+            _INSTALLED_README_PATH.read_text(encoding="utf-8"),
+        )
+
+    @staticmethod
+    def _required_match(pattern: str, text: str, source: Path) -> str:
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match is None:
+            raise AssertionError(f"version declaration not found in {source}")
+        return match.group(1)
+
+    def test_program_installer_and_package_share_release_version(self):
+        versions = {
+            "installer": self._required_match(
+                r'^#define AppVersion "([^"]+)"$', self.iss_text, _ISS_PATH
+            ),
+            "package": self._required_match(
+                r'^version = "([^"]+)"$', self.pyproject_text, _PYPROJECT_PATH
+            ),
+            "program": self._required_match(
+                r'^__version__ = "([^"]+)"$',
+                self.package_init_text,
+                _PACKAGE_INIT_PATH,
+            ),
+        }
+        self.assertEqual({"0.2.0"}, set(versions.values()), versions)
+
+    def test_release_version_and_tag_are_documented_consistently(self):
+        self.assertIn("## [0.2.0]", self.changelog_text)
+        for text in self.readmes:
+            self.assertIn("0.2.0", text)
+        for text in self.readmes[:2]:
+            self.assertIn("v0.2.0-windows", text)
 
 
 def _exec_as_top_level_no_package(path: Path, *, module_name: str) -> None:
@@ -1113,7 +1161,7 @@ class RootDocumentConsistencyTests(unittest.TestCase):
     def test_root_readme_does_not_lump_windows_in_with_planned_research(self):
         self.assertIn("Windows 版本（RC003）", self.root_readme_text)
         self.assertIn("Windows 客户端位于", self.root_readme_text)
-        self.assertIn("源码/构建候选", self.root_readme_text)
+        self.assertIn("当前正式版 `0.2.0`", self.root_readme_text)
         self.assertIn("不能替代", self.root_readme_text)
 
     def test_third_party_notices_does_not_falsely_deny_all_vbcable_reference(self):
@@ -1155,14 +1203,13 @@ class RootDocumentConsistencyTests(unittest.TestCase):
         )
         self.assertIn("never changes the Windows system default input/output device", self.notices_text)
 
-    def test_root_readme_and_windows_readme_agree_rc003_windows_is_a_candidate(self):
-        # Cross-file consistency: both docs must describe the RC003 Windows
-        # combination the same way (source/build candidate, not
-        # real-device verified) rather than one calling it a candidate and
-        # the other calling it merely planned/research.
+    def test_root_readme_and_windows_readme_agree_on_official_version(self):
+        # Cross-file consistency: both public entry points must identify the
+        # same real-device-verified Windows release.
         windows_readme_text = _README_PATH.read_text(encoding="utf-8")
         for text in (self.root_readme_text, windows_readme_text):
-            self.assertIn("源码/构建候选", text)
+            self.assertIn("0.2.0", text)
+            self.assertIn("已通过真实硬件验收", text)
 
 
 _CJK_CHAR_RE = r"[　-〿぀-ヿ㐀-鿿＀-￯]"
@@ -1191,8 +1238,8 @@ def _normalize_whitespace(text: str) -> str:
     return text.strip()
 
 
-class PrereleaseDownloadInstructionsContractTests(unittest.TestCase):
-    """XRBM-027: the public prerelease download flow - a generic Releases
+class ReleaseDownloadInstructionsContractTests(unittest.TestCase):
+    """The public release download flow - a generic Releases
     page link (so it survives a tag not existing yet), the exact asset name
     patterns the CI packaging step actually produces, and the release-tag
     vs internal-build-version distinction - must stay documented and must
@@ -1207,15 +1254,9 @@ class PrereleaseDownloadInstructionsContractTests(unittest.TestCase):
 
     def test_links_to_the_generic_releases_page(self):
         self.assertIn(
-            "https://github.com/miaomiaozii/windows-remote-mic-app/releases", self.text
+            "https://github.com/pbook1207/windows-remote-mic-app/releases", self.text
         )
-        # The bare list page is the stable entry point; any direct
-        # /releases/tag/... link must point at a tag this repo actually
-        # published (so a future tag bump that forgets to publish 404s the
-        # doc instead of silently breaking).
-        self.assertIn(
-            "/releases/tag/v0.1.0-windows-rc003-candidate.1", self.text
-        )
+        self.assertIn("v0.2.0-windows", self.text)
 
     def test_does_not_make_a_time_dependent_claim_about_prerelease_existence(self):
         # XRBM-027 RETRY 1 correction: a sentence saying "even if there is
@@ -1243,12 +1284,9 @@ class PrereleaseDownloadInstructionsContractTests(unittest.TestCase):
             self.iss_text,
         )
 
-    def test_documents_the_release_tag_vs_internal_build_version_distinction(self):
-        self.assertIn("v0.3.0-windows-rc003-candidate.1", self.text)
-        # The doc's claimed internal build version must match the .iss
-        # file's real AppVersion - not just a hardcoded literal that could
-        # silently drift the moment a future task bumps AppVersion without
-        # updating this sentence.
+    def test_documents_unified_release_and_candidate_versioning(self):
+        self.assertIn("v0.2.0-windows", self.text)
+        self.assertIn("0.3.0-rc.1", self.text)
         version_match = re.search(r'#define AppVersion "([^"]+)"', self.iss_text)
         self.assertIsNotNone(version_match)
         self.assertIn(version_match.group(1), self.text)
@@ -1271,11 +1309,10 @@ class RealWindowsCiEvidenceContractTests(unittest.TestCase):
         for phrase in ("WinRT BLE", "Raw Input", "SendInput", "PortAudio"):
             self.assertIn(phrase, self.readme_text)
 
-    def test_status_is_a_candidate_that_has_passed_real_device_acceptance(self):
-        # The candidate has since completed real-device acceptance (key-by-key
-        # and voice-link); the README must say so honestly, while keeping the
-        # "cannot be replaced by CI" limit.
-        self.assertIn("源码/构建候选", self.readme_text)
+    def test_status_is_an_official_release_that_passed_real_device_acceptance(self):
+        # The release completed real-device acceptance (key-by-key and
+        # voice-link), while CI still cannot replace physical verification.
+        self.assertIn("Windows 正式版 0.2.0", self.readme_text)
         self.assertIn("已通过真实硬件验收", self.readme_text)
         self.assertIn("不能替代真机配对、按键和语音链路验收", self.readme_text)
         self.assertNotIn("verified on real rc003 hardware", self.readme_text.lower())
@@ -1286,8 +1323,8 @@ class RealWindowsCiEvidenceContractTests(unittest.TestCase):
         self.assertIn("已通过真实硬件验收", self.readme_text)
 
     def test_repository_links_to_its_own_actions_and_releases(self):
-        self.assertIn("https://github.com/miaomiaozii/windows-remote-mic-app/releases", self.readme_text)
-        self.assertIn("https://github.com/miaomiaozii/windows-remote-mic-app/actions", self.readme_text)
+        self.assertIn("https://github.com/pbook1207/windows-remote-mic-app/releases", self.readme_text)
+        self.assertIn("https://github.com/pbook1207/windows-remote-mic-app/actions", self.readme_text)
 
 
 class PortableAndInstallerFlowContractTests(unittest.TestCase):
@@ -1439,8 +1476,8 @@ class ConfigLogResidueDisclosureContractTests(unittest.TestCase):
         self.assertIn(config.CONFIG_FILENAME, portable_section)
 
 
-class WindowsPrereleaseAssetScopeContractTests(unittest.TestCase):
-    """XRBM-027 CORRECTION 1: a bare "every prerelease has exactly these
+class WindowsReleaseAssetScopeContractTests(unittest.TestCase):
+    """A bare "every release has exactly these
     three files" claim must not be read as covering unrelated releases or
     other product variants.
     """
@@ -1448,8 +1485,8 @@ class WindowsPrereleaseAssetScopeContractTests(unittest.TestCase):
     def setUp(self):
         self.text = _README_PATH.read_text(encoding="utf-8")
 
-    def test_asset_count_claim_is_scoped_to_the_windows_candidate(self):
-        self.assertIn("每个 RC003 Windows 候选预发行版恰好包含以下三个文件", self.text)
+    def test_asset_count_claim_is_scoped_to_the_windows_release(self):
+        self.assertIn("每个 RC003 Windows 正式版恰好包含以下三个文件", self.text)
         self.assertNotIn("每个预发行版恰好包含以下三个文件", self.text)
 
 

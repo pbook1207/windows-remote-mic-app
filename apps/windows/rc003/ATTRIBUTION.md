@@ -4,7 +4,7 @@
 
 - 上游项目：[`nijez/open-voice-bridge`](https://github.com/nijez/open-voice-bridge)
 - 上游 Windows 实现：`apps/windows/rc003/`
-- 本仓库：[`miaomiaozii/windows-remote-mic-app`](https://github.com/miaomiaozii/windows-remote-mic-app)
+- 本仓库：[`pbook1207/windows-remote-mic-app`](https://github.com/pbook1207/windows-remote-mic-app)
 
 上游项目已经提供了 RC003 的 Windows 参考实现，包括 WinRT BLE、ATVV 语音协议、
 Windows Raw Input、SendInput、PortAudio 音频输出、Qt/QML 设置页、诊断、测试和
@@ -15,7 +15,7 @@ PyInstaller/Inno Setup 构建流程。本仓库在 GPL-3.0-only 条件下保留�
 - 适配本仓库现有的 `LICENSE.md`、`COPYRIGHT.md` 和第三方声明文件；
 - 补充中文安装、配对、VB-CABLE 配置、按键映射和故障排查说明；
 - 保留上游的失败关闭策略、隐私约束、跨平台协议测试和 Windows CI 校验；
-- 明确声明当前候选版本已完成真实 RC003 硬件配对、逐键和语音链路验收；验收不能
+- 明确声明 Windows 正式版 `0.2.0` 已完成真实 RC003 硬件配对、逐键和语音链路验收；验收不能
   被自动构建或 CI 替代。
 
 源码中仍保留 `ovb_rc003` 这一内部 Python 包名，以减少从上游同步修复时的差异；

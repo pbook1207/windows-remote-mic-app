@@ -1,11 +1,10 @@
 """Entry point wiring: connects the pieces into a running RC003 client.
 
 Windows-only end-to-end (BLE via winrt, HID via Raw Input, key injection via
-SendInput). NOT exercised against real hardware in this candidate - no
-device pairing/control happens anywhere in this repository or its tests, per
-the project's hard boundary. See this package's top-level README.md "Known
-gaps" section for what remains 待核验 (to be verified) on a real Windows
-machine with a paired RC003.
+SendInput). The 0.2.0 release completed real RC003 pairing, button, voice and
+restart acceptance on Windows. Repository automation still never pairs with
+or controls physical hardware, so CI cannot replace release-time testing on
+a representative Windows machine with a paired RC003.
 
 Reconnect/cleanup contract (fixed after XRBM-014 review RETRY P1 #2 - see
 XRBM-014's independent review): ``RC003App`` no longer connects once
