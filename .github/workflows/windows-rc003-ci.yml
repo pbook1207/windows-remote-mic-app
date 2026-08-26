@@ -3,7 +3,9 @@ name: windows-rc003-ci
 # Candidate CI for the Remote Mic · RC003 Windows client
 # (apps/windows/rc003). This runs the cross-platform pure-Python test suite
 # and a public-boundary scan on a real Windows runner, builds an unsigned
-# PyInstaller artifact, smoke-checks the built executable with --dry-run
+# PyInstaller artifact after fetching and hash-verifying the pinned Frida
+# Gadget and VB-CABLE archives, verifies that the Gadget is present in the
+# frozen output, smoke-checks the built executable with --dry-run
 # (imports every module, touches no GUI/BLE/HID/audio, exits 0), compiles
 # the Inno Setup installer SOURCE into an unsigned installer .exe, and
 # packages a deterministic unsigned portable ZIP (a versioned staging
@@ -83,6 +85,17 @@ jobs:
         shell: pwsh
         run: |
           ./build/check-public-boundary.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The source tree deliberately does not commit Frida's binary. Official
+      # CI candidates do require the pinned, hash-verified archive because the
+      # RC003 back/volume HID usages depend on it on affected Windows systems.
+      # Fetch only after the clean-source public-boundary scan; any network or
+      # integrity failure stops the job instead of publishing a partial build.
+      - name: Fetch and verify Frida Gadget
+        shell: pwsh
+        run: |
+          ./build/fetch-frida-gadget.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install dependencies
@@ -180,6 +193,26 @@ jobs:
         run: |
           python -m PyInstaller build/RemoteMicRC003.spec --distpath dist --workpath build/pyinstaller-work --noconfirm
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Fetch-time verification alone is not enough: a future spec change
+      # could accidentally omit the already-verified archive while leaving
+      # the job green. Check the exact frozen location and hash before either
+      # the portable ZIP or installer is produced.
+      - name: Verify bundled Frida Gadget
+        shell: pwsh
+        run: |
+          $gadgetPath = "dist/RemoteMicRC003/_internal/ovb_rc003/frida_assets/frida-gadget-17.15.3-windows-x86_64.dll.xz"
+          $expectedSha256 = "B566D70189B6D551AD8F4E0BEA24DE08A3D4C0F559BB35B2BDB67D45182240C2"
+          if (-not (Test-Path -LiteralPath $gadgetPath -PathType Leaf)) {
+            Write-Error "required bundled Frida Gadget not found: $gadgetPath"
+            exit 1
+          }
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $gadgetPath).Hash.ToUpperInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            Write-Error "bundled Frida Gadget SHA-256 mismatch: expected $expectedSha256, got $actualSha256"
+            exit 1
+          }
+          Write-Host "verified bundled Frida Gadget: $gadgetPath"
 
       - name: Built-artifact dry-run smoke check (no GUI/BLE/HID/audio)
         shell: pwsh
