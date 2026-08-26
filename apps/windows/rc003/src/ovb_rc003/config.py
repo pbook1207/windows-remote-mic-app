@@ -98,6 +98,14 @@ def default_config() -> Dict[str, Any]:
         "voice_hotkey": key_mapping.voice_hotkey_for_trigger_mode(
             key_mapping.VoiceTriggerMode.TOGGLE
         ),
+        # Optional second microphone gesture: tap once, then press and hold.
+        # This is an ordinary editable host chord, not a firmware-locked
+        # binding.  Clearing it in settings disables gesture disambiguation
+        # and preserves the original immediate microphone path.
+        "voice_secondary_hotkey": "ralt+space",
+        # Opt-in for existing installations: enabling gesture recognition
+        # adds a short hold-confirmation delay to the original mic action.
+        "voice_secondary_gesture_enabled": False,
         "voice_trigger_mode": "toggle",
         # Empty until the user explicitly picks one in settings; voice fails
         # closed while this is empty (see audio_output.resolve_selected_endpoint).
@@ -180,6 +188,8 @@ def _normalize_voice_hotkey(config: Dict[str, Any]) -> None:
     current = str(config.get("voice_hotkey", "")).strip().lower()
     if current:
         config["voice_hotkey"] = current
+    secondary = str(config.get("voice_secondary_hotkey", "")).strip().lower()
+    config["voice_secondary_hotkey"] = secondary
 
 
 def default_key_bindings() -> Dict[str, Any]:

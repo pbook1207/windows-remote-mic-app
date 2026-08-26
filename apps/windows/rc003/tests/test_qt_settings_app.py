@@ -126,6 +126,10 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
         self.assertIn("SettingsController.startHotkeyCapture()", source)
         self.assertIn("SettingsController.stopHotkeyCapture()", source)
         self.assertIn("SettingsController.hotkeyText = chord", source)
+        self.assertIn('objectName: "secondaryHotkeyField"', source)
+        self.assertIn('objectName: "recordSecondaryVoiceHotkeyButton"', source)
+        self.assertIn('objectName: "secondaryGestureCheck"', source)
+        self.assertIn("SettingsController.secondaryHotkeyText = chord", source)
 
     def test_connection_page_has_compact_task_order_and_one_persistent_action_bar(self):
         source = (
@@ -154,9 +158,15 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         buttons_source = (qml_root / "ButtonsPage.qml").read_text(encoding="utf-8")
-        self.assertIn('text: qsTr("触发方式")', connection_source)
-        self.assertIn("RC003 不支持点按后持续录音", connection_source)
-        self.assertIn("这里的点按或按住仅指电脑端快捷键", connection_source)
+        self.assertIn('text: qsTr("语音传输方式")', connection_source)
+        self.assertIn("适用于 Typeless", connection_source)
+        self.assertIn("适用于按一次开始、再按一次结束的软件", connection_source)
+        self.assertIn("适用于必须持续按住快捷键的软件", connection_source)
+        self.assertIn("上述区别仅指电脑端如何执行快捷键", connection_source)
+        self.assertIn('text: qsTr("方式一：直接长按")', connection_source)
+        self.assertIn('text: qsTr("方式二：短按后再次长按")', connection_source)
+        self.assertIn('text: qsTr("录入按键")', connection_source)
+        self.assertIn("enabled: SettingsController.secondaryGestureEnabled", connection_source)
         self.assertIn('objectName: "voiceHotkeySummary_"', buttons_source)
         self.assertIn("在“连接”页设置", buttons_source)
         self.assertNotIn('objectName: "voiceHotkeyField_"', buttons_source)

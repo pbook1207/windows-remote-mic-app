@@ -26,6 +26,12 @@ class DefaultConfigPrivacyTests(unittest.TestCase):
     def test_default_config_preserves_existing_users_on_rc003(self):
         self.assertEqual(config.default_config()["selected_device_profile"], "xiaomi-rc003")
         self.assertEqual(config.default_config()["voice_hotkey"], "ralt+space")
+        self.assertEqual(
+            config.default_config()["voice_secondary_hotkey"], "ralt+space"
+        )
+        self.assertFalse(
+            config.default_config()["voice_secondary_gesture_enabled"]
+        )
         self.assertEqual(config.default_config()["gain_db"], 10.0)
 
     def test_default_config_contains_no_forbidden_identity_fields(self):

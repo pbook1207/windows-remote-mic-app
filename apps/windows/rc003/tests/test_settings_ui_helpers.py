@@ -275,6 +275,52 @@ class BuildSaveModelTests(unittest.TestCase):
         self.assertEqual(new_bindings["bindings"]["mic"]["kind"], "voice")
         self.assertEqual(new_bindings["bindings"]["power"]["kind"], "key_combo")
 
+    def test_secondary_voice_gesture_is_independently_configurable(self):
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="ralt",
+            secondary_hotkey_text="ralt+space",
+            secondary_gesture_enabled=True,
+            trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+        )
+
+        self.assertEqual(new_config["voice_hotkey"], "ralt")
+        self.assertEqual(new_config["voice_secondary_hotkey"], "ralt+space")
+        self.assertTrue(new_config["voice_secondary_gesture_enabled"])
+
+    def test_invalid_secondary_voice_hotkey_is_rejected(self):
+        with self.assertRaises(SettingsValidationError) as ctx:
+            build_save_model(
+                button_display_map={},
+                hotkey_text="ralt",
+                secondary_hotkey_text="ctrl",
+                secondary_gesture_enabled=True,
+                trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+                endpoint_display_text="",
+                base_config=self.base_config,
+                base_bindings=self.base_bindings,
+            )
+
+        self.assertIn("第二语音快捷键", ctx.exception.message)
+
+    def test_enabled_secondary_gesture_requires_a_shortcut(self):
+        with self.assertRaises(SettingsValidationError) as ctx:
+            build_save_model(
+                button_display_map={},
+                hotkey_text="ralt",
+                secondary_hotkey_text="",
+                secondary_gesture_enabled=True,
+                trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+                endpoint_display_text="",
+                base_config=self.base_config,
+                base_bindings=self.base_bindings,
+            )
+
+        self.assertIn("请填写第二语音快捷键", ctx.exception.message)
+
     def test_mic_is_forced_to_voice_even_if_the_display_map_says_otherwise(self):
         # XRBM-019 In-scope item 6: the settings UI no longer offers an
         # editable mic row at all, but build_save_model() is the

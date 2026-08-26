@@ -260,6 +260,69 @@ class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
         self.assertEqual(self.app._ble_session.mic_open_calls, 0)
         self.assertTrue(self.app._voice.active)
 
+    def test_enabled_secondary_gesture_delays_direct_hold_then_uses_primary(self):
+        self.app._voice = app_module.voice_controller.VoiceController(
+            key_mapping.VoiceTriggerMode.HOLD
+        )
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        self.app._voice_secondary_hotkey = app_module.hotkey.HotkeySpec.parse(
+            "ralt+space"
+        )
+        self.app._mic_secondary_gesture_enabled = True
+        calls = []
+
+        with mock.patch.object(
+            win32_input,
+            "send_voice_key_combo_down",
+            side_effect=lambda tokens: calls.append(("down", tokens)),
+        ), mock.patch.object(
+            app_module.threading, "Timer", return_value=mock.Mock()
+        ) as timer_factory:
+            self.app._on_button_event("mic", True)
+            self.assertEqual(calls, [])
+            callback = timer_factory.call_args.args[1]
+            callback(*timer_factory.call_args.kwargs.get("args", ()))
+
+        self.assertEqual(calls, [("down", ("ralt",))])
+
+    def test_tap_then_second_hold_uses_secondary_hotkey_only(self):
+        self.app._voice = app_module.voice_controller.VoiceController(
+            key_mapping.VoiceTriggerMode.HOLD
+        )
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        self.app._voice_secondary_hotkey = app_module.hotkey.HotkeySpec.parse(
+            "ralt+space"
+        )
+        self.app._mic_secondary_gesture_enabled = True
+        calls = []
+
+        with mock.patch.object(
+            win32_input,
+            "send_voice_key_combo_down",
+            side_effect=lambda tokens: calls.append(("down", tokens)),
+        ), mock.patch.object(
+            win32_input,
+            "send_voice_key_combo_up",
+            side_effect=lambda tokens: calls.append(("up", tokens)),
+        ), mock.patch.object(
+            app_module.threading, "Timer", side_effect=lambda *args, **kwargs: mock.Mock()
+        ) as timer_factory:
+            self.app._on_button_event("mic", True)
+            self.app._on_button_event("mic", False)
+            self.app._on_button_event("mic", True)
+            self.assertEqual(calls, [])
+            callback = timer_factory.call_args.args[1]
+            callback(*timer_factory.call_args.kwargs.get("args", ()))
+            self.app._on_control_event(AudioStopped())
+
+        self.assertEqual(
+            calls,
+            [
+                ("down", ("ralt", "space")),
+                ("up", ("ralt", "space")),
+            ],
+        )
+
     def test_raw_input_mic_button_release_does_not_close_or_retrigger_voice(self):
         hotkey_calls = []
         original = win32_input.send_voice_key_combo_tap
