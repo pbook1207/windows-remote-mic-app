@@ -366,6 +366,8 @@ def build_save_model(
     unified_virtual_input_enabled: Optional[bool] = None,
     unified_on_demand_enabled: Optional[bool] = None,
     system_input_endpoint_display_text: Optional[str] = None,
+    secondary_hotkey_text: Optional[str] = None,
+    secondary_gesture_enabled: Optional[bool] = None,
 ) -> Tuple[dict, dict]:
     """Pure validation+build step for "Save"/"Restore defaults", with no Tk
     dependency at all - directly unit tested without constructing any
@@ -380,6 +382,29 @@ def build_save_model(
         raise SettingsValidationError(None, str(exc)) from exc
     except win32_keys.UnknownKeyTokenError as exc:
         raise SettingsValidationError(None, str(exc)) from exc
+
+    resolved_secondary_hotkey = (
+        str(base_config.get("voice_secondary_hotkey", ""))
+        if secondary_hotkey_text is None
+        else secondary_hotkey_text.strip()
+    )
+    if resolved_secondary_hotkey:
+        try:
+            parsed_secondary = hotkey.HotkeySpec.parse(resolved_secondary_hotkey)
+            win32_keys.resolve_vk_codes(
+                tuple(parsed_secondary.modifiers) + (parsed_secondary.key,)
+            )
+        except hotkey.HotkeyParseError as exc:
+            raise SettingsValidationError(None, f"第二语音快捷键：{exc}") from exc
+        except win32_keys.UnknownKeyTokenError as exc:
+            raise SettingsValidationError(None, f"第二语音快捷键：{exc}") from exc
+    requested_secondary_gesture = (
+        bool(base_config.get("voice_secondary_gesture_enabled", False))
+        if secondary_gesture_enabled is None
+        else bool(secondary_gesture_enabled)
+    )
+    if requested_secondary_gesture and not resolved_secondary_hotkey:
+        raise SettingsValidationError(None, "启用第二按键方式前，请填写第二语音快捷键。")
 
     bindings: Dict[str, dict] = {}
     for button_id, text in button_display_map.items():
@@ -473,6 +498,8 @@ def build_save_model(
         selected_device_profile
     )
     new_config["voice_hotkey"] = hotkey_text.strip()
+    new_config["voice_secondary_hotkey"] = resolved_secondary_hotkey
+    new_config["voice_secondary_gesture_enabled"] = requested_secondary_gesture
     new_config["voice_trigger_mode"] = trigger_mode.value
     new_config["output_endpoint_name"] = endpoint_name
     new_config["output_endpoint_host_api"] = endpoint_host_api

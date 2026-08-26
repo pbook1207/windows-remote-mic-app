@@ -98,6 +98,12 @@ _TYPELESS_MIN_TAP_INTERVAL_SECONDS = 0.75
 # not close/re-arm Typeless until release has stayed quiet for this long.
 _TYPELESS_STABLE_RELEASE_SECONDS = 0.50
 _UNIFIED_INPUT_RELEASE_DEBOUNCE_SECONDS = 0.12
+# A first press must remain down this long before it becomes the ordinary
+# hold gesture.  A quick release instead arms the second-press window; the
+# second press must also remain down this long, so an accidental double tap
+# never opens voice input.
+_MIC_GESTURE_HOLD_SECONDS = 0.25
+_MIC_GESTURE_DOUBLE_SECONDS = 0.45
 _MIC_HID_USAGES = frozenset(
     usage
     for usage, button in frida_compat.TAP_USAGE_TO_BUTTON.items()
@@ -149,6 +155,24 @@ class RC003App:
             key_mapping.VoiceTriggerMode(self._config["voice_trigger_mode"])
         )
         self._voice_hotkey = hotkey.HotkeySpec.parse(self._config["voice_hotkey"])
+        secondary_hotkey_text = str(
+            self._config.get("voice_secondary_hotkey", "")
+        ).strip()
+        self._voice_secondary_hotkey = (
+            hotkey.HotkeySpec.parse(secondary_hotkey_text)
+            if secondary_hotkey_text
+            else None
+        )
+        self._mic_secondary_gesture_enabled = bool(
+            self._config.get("voice_secondary_gesture_enabled", False)
+        ) and self._voice_secondary_hotkey is not None
+        self._active_voice_hotkey = self._voice_hotkey
+        self._mic_gesture_timer: Optional[threading.Timer] = None
+        self._mic_gesture_generation = 0
+        self._mic_gesture_is_down = False
+        self._mic_gesture_kind: Optional[str] = None
+        self._mic_gesture_triggered = False
+        self._mic_first_tap_released_at: Optional[float] = None
         self._typeless_last_tap_completed_at: Optional[float] = None
         self._typeless_close_timer: Optional[threading.Timer] = None
         self._unified_input_release_timer: Optional[threading.Timer] = None
@@ -519,6 +543,7 @@ class RC003App:
                 if self._unified_input_release_timer is not None:
                     self._unified_input_release_timer.cancel()
                     self._unified_input_release_timer = None
+                self._reset_mic_gesture_locked()
                 self._voice_audio_start_fallback_pending = False
                 self._voice_audio_started_waiting_for_legacy_f5 = False
                 self._voice_raw_input_trigger_pending = False
@@ -617,8 +642,11 @@ class RC003App:
     def _legacy_voice_transform_enabled(self) -> bool:
         """Whether the selected HOLD preset uses the physical right-Alt path."""
 
-        return self._voice.trigger_mode == key_mapping.VoiceTriggerMode.HOLD and (
-            self._voice_hotkey.serialize() in {"ralt", "lctrl+win", "lctrl+lwin"}
+        return (
+            not self._mic_secondary_gesture_enabled
+            and self._voice.trigger_mode == key_mapping.VoiceTriggerMode.HOLD
+            and self._voice_hotkey.serialize()
+            in {"ralt", "lctrl+win", "lctrl+lwin"}
         )
 
     def _emit_legacy_voice_key(
@@ -825,6 +853,109 @@ class RC003App:
         except OSError:
             self._logger.exception("text menu selection input failed")
 
+    def _reset_mic_gesture_locked(self) -> None:
+        """Cancel and forget every pending microphone-gesture decision."""
+
+        self._mic_gesture_generation += 1
+        if self._mic_gesture_timer is not None:
+            self._mic_gesture_timer.cancel()
+            self._mic_gesture_timer = None
+        self._mic_gesture_is_down = False
+        self._mic_gesture_kind = None
+        self._mic_gesture_triggered = False
+        self._mic_first_tap_released_at = None
+
+    def _schedule_mic_gesture_locked(self, kind: str) -> None:
+        self._mic_gesture_generation += 1
+        generation = self._mic_gesture_generation
+        if self._mic_gesture_timer is not None:
+            self._mic_gesture_timer.cancel()
+        timer = threading.Timer(
+            _MIC_GESTURE_HOLD_SECONDS,
+            self._fire_mic_gesture,
+            args=(generation, kind),
+        )
+        timer.daemon = True
+        self._mic_gesture_timer = timer
+        timer.start()
+
+    def _fire_mic_gesture(self, generation: int, kind: str) -> None:
+        with self._voice_trigger_lock:
+            if (
+                generation != self._mic_gesture_generation
+                or not self._mic_gesture_is_down
+                or self._mic_gesture_kind != kind
+                or self._mic_gesture_triggered
+            ):
+                return
+            self._mic_gesture_timer = None
+            self._mic_gesture_triggered = True
+            self._active_voice_hotkey = (
+                self._voice_secondary_hotkey
+                if kind == "secondary" and self._voice_secondary_hotkey is not None
+                else self._voice_hotkey
+            )
+            self._cancel_unified_release_timer_locked()
+            if self._voice.active:
+                self._logger.info(
+                    "voice %s mic gesture ignored: voice session already active", kind
+                )
+                return
+            self._logger.info(
+                "voice %s mic gesture recognized after %.0f ms hold",
+                kind,
+                _MIC_GESTURE_HOLD_SECONDS * 1000,
+            )
+            self._handle_mic_button_pressed(
+                send_device_open=False,
+                voice_hotkey=self._active_voice_hotkey,
+            )
+
+    def _on_mic_gesture_edge_locked(self, is_pressed: bool) -> None:
+        """Disambiguate hold from tap-then-hold using physical mic edges."""
+
+        now = time.monotonic()
+        if is_pressed:
+            if self._mic_gesture_is_down:
+                return
+            self._cancel_unified_release_timer_locked()
+            if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                self._cancel_typeless_release_timer_locked(
+                    "physical mic gesture pressed again"
+                )
+            is_second = (
+                self._mic_first_tap_released_at is not None
+                and now - self._mic_first_tap_released_at
+                <= _MIC_GESTURE_DOUBLE_SECONDS
+            )
+            self._mic_first_tap_released_at = None
+            self._mic_gesture_is_down = True
+            self._mic_gesture_triggered = False
+            self._mic_gesture_kind = "secondary" if is_second else "primary"
+            self._schedule_mic_gesture_locked(self._mic_gesture_kind)
+            return
+
+        if not self._mic_gesture_is_down:
+            return
+        kind = self._mic_gesture_kind
+        triggered = self._mic_gesture_triggered
+        self._mic_gesture_generation += 1
+        if self._mic_gesture_timer is not None:
+            self._mic_gesture_timer.cancel()
+            self._mic_gesture_timer = None
+        self._mic_gesture_is_down = False
+        self._mic_gesture_kind = None
+        self._mic_gesture_triggered = False
+        if not triggered and kind == "primary":
+            self._mic_first_tap_released_at = now
+            self._logger.info("voice short mic tap armed the second-hold window")
+        else:
+            self._mic_first_tap_released_at = None
+        if triggered:
+            self._schedule_unified_restore_after_release_locked()
+            if self._voice.trigger_mode in _TYPELESS_PHYSICAL_MODES:
+                self._request_typeless_close_locked("physical mic release")
+
     def _on_button_event(
         self, button_id: str, is_pressed: bool, *, host_action_handled: bool = False
     ) -> None:
@@ -848,6 +979,10 @@ class RC003App:
                 self._input_text_menu_selection(text)
             return
         if button_id == "mic":
+            if self._mic_secondary_gesture_enabled:
+                with self._voice_trigger_lock:
+                    self._on_mic_gesture_edge_locked(is_pressed)
+                return
             if not is_pressed:
                 with self._voice_trigger_lock:
                     self._schedule_unified_restore_after_release_locked()
@@ -1069,7 +1204,12 @@ class RC003App:
             )
         elif isinstance(event, MicButtonPressed):
             with self._voice_trigger_lock:
-                if self._voice_raw_input_trigger_pending:
+                if self._mic_secondary_gesture_enabled:
+                    self._logger.info(
+                        "voice ATVV mic event waiting for physical hold gesture"
+                    )
+                    self._open_playback_for_new_session()
+                elif self._voice_raw_input_trigger_pending:
                     self._voice_raw_input_trigger_pending = False
                     self._logger.info(
                         "voice mic trigger ignored: matched prior Raw Input trigger"
@@ -1105,7 +1245,12 @@ class RC003App:
                     self._cancel_typeless_release_timer_locked(
                         "audio restarted before stable release"
                     )
-                if not self._voice.active:
+                if self._mic_secondary_gesture_enabled:
+                    self._logger.info(
+                        "voice audio start waiting for physical hold gesture"
+                    )
+                    self._open_playback_for_new_session()
+                elif not self._voice.active:
                     if self._legacy_voice_transform_enabled():
                         self._logger.info(
                             "voice audio started before F5; waiting for physical mic edge"
@@ -1307,6 +1452,7 @@ class RC003App:
         *,
         send_device_open: bool = True,
         host_action_handled: bool = False,
+        voice_hotkey: Optional[hotkey.HotkeySpec] = None,
     ) -> None:
         """Resolve and open the user-selected output endpoint FIRST; only
         send the hotkey if that succeeds, and only send MIC_OPEN if the
@@ -1322,6 +1468,8 @@ class RC003App:
         if self._ble_session is None:
             self._logger.info("voice ignored: BLE voice session is not connected")
             return
+
+        self._active_voice_hotkey = voice_hotkey or self._voice_hotkey
 
         self._voice_audio_started_waiting_for_legacy_f5 = False
 
@@ -1358,7 +1506,9 @@ class RC003App:
             self._ble_session.send_mic_open_threadsafe()
 
     def _apply_voice_action(self, action: voice_controller.VoiceHostAction) -> bool:
-        tokens = tuple(self._voice_hotkey.modifiers) + (self._voice_hotkey.key,)
+        tokens = tuple(self._active_voice_hotkey.modifiers) + (
+            self._active_voice_hotkey.key,
+        )
         if self._voice_legacy_transform_session:
             if (
                 action == voice_controller.VoiceHostAction.KEY_UP

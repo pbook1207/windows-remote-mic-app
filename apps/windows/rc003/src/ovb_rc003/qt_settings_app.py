@@ -643,6 +643,8 @@ def _load_qt_classes() -> dict:
         """
 
         hotkeyTextChanged = Signal()
+        secondaryHotkeyTextChanged = Signal()
+        secondaryGestureEnabledChanged = Signal()
         triggerModeIndexChanged = Signal()
         endpointOptionsChanged = Signal()
         selectedEndpointIndexChanged = Signal()
@@ -704,6 +706,12 @@ def _load_qt_classes() -> dict:
 
             self._hotkey_text = self._config.get(
                 "voice_hotkey", hotkey.DEFAULT_VOICE_HOTKEY.serialize()
+            )
+            self._secondary_hotkey_text = self._config.get(
+                "voice_secondary_hotkey", "ralt+space"
+            )
+            self._secondary_gesture_enabled = bool(
+                self._config.get("voice_secondary_gesture_enabled", False)
             )
             saved_trigger_mode = key_mapping.VoiceTriggerMode(
                 self._config.get("voice_trigger_mode", "toggle")
@@ -1032,6 +1040,8 @@ def _load_qt_classes() -> dict:
                     button_display_map=self._model.to_display_map(),
                     secondary_display_map=self._model.to_secondary_display_map(),
                     hotkey_text=self._hotkey_text,
+                    secondary_hotkey_text=self._secondary_hotkey_text,
+                    secondary_gesture_enabled=self._secondary_gesture_enabled,
                     trigger_mode=trigger_mode,
                     endpoint_display_text=endpoint_display,
                     base_config=self._config,
@@ -1134,6 +1144,36 @@ def _load_qt_classes() -> dict:
                 self.hotkeyTextChanged.emit()
 
         hotkeyText = Property(str, _get_hotkey_text, _set_hotkey_text, notify=hotkeyTextChanged)
+
+        def _get_secondary_hotkey_text(self) -> str:
+            return self._secondary_hotkey_text
+
+        def _set_secondary_hotkey_text(self, value: str) -> None:
+            if value != self._secondary_hotkey_text:
+                self._secondary_hotkey_text = value
+                self.secondaryHotkeyTextChanged.emit()
+
+        secondaryHotkeyText = Property(
+            str,
+            _get_secondary_hotkey_text,
+            _set_secondary_hotkey_text,
+            notify=secondaryHotkeyTextChanged,
+        )
+
+        def _get_secondary_gesture_enabled(self) -> bool:
+            return self._secondary_gesture_enabled
+
+        def _set_secondary_gesture_enabled(self, value: bool) -> None:
+            if value != self._secondary_gesture_enabled:
+                self._secondary_gesture_enabled = value
+                self.secondaryGestureEnabledChanged.emit()
+
+        secondaryGestureEnabled = Property(
+            bool,
+            _get_secondary_gesture_enabled,
+            _set_secondary_gesture_enabled,
+            notify=secondaryGestureEnabledChanged,
+        )
 
         def _get_trigger_mode_options(self) -> List[str]:
             return [settings_ui._TRIGGER_MODE_LABELS[mode] for mode in self._TRIGGER_MODE_ORDER]

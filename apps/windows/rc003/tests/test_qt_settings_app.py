@@ -126,6 +126,10 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
         self.assertIn("SettingsController.startHotkeyCapture()", source)
         self.assertIn("SettingsController.stopHotkeyCapture()", source)
         self.assertIn("SettingsController.hotkeyText = chord", source)
+        self.assertIn('objectName: "secondaryHotkeyField"', source)
+        self.assertIn('objectName: "recordSecondaryVoiceHotkeyButton"', source)
+        self.assertIn('objectName: "secondaryGestureCheck"', source)
+        self.assertIn("SettingsController.secondaryHotkeyText = chord", source)
 
     def test_connection_page_has_compact_task_order_and_one_persistent_action_bar(self):
         source = (
