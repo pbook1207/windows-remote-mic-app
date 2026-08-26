@@ -1,4 +1,4 @@
-# PyInstaller spec for Remote Mic · RC003 (Windows source/build candidate).
+# PyInstaller spec for Remote Mic · RC003 on Windows.
 #
 # One-dir build (COLLECT), matching the layout pattern this project's
 # upstream reference uses for its own standalone products, minus everything
@@ -12,7 +12,7 @@
 #   pyinstaller build/RemoteMicRC003.spec
 #
 # This produces an UNSIGNED candidate under dist/RemoteMicRC003/. Real
-# code signing is out of scope for this source/build candidate.
+# code signing is not currently configured for this community build.
 
 import sys
 from pathlib import Path

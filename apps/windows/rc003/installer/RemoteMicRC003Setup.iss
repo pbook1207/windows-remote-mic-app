@@ -1,7 +1,6 @@
-; Inno Setup source for Remote Mic · RC003 (Windows source/build
-; candidate). Unsigned. Not yet real-device verified - see this
-; subtree's top-level README.md "Known gaps" section before treating
-; this as a supported release artifact.
+; Inno Setup source for Remote Mic · RC003 on Windows. The 0.2.0 release
+; passed real RC003 hardware acceptance. The package remains unsigned;
+; see this subtree's README.md for verification scope and installation safety.
 ;
 ; Hard boundaries enforced by this script:
 ;   - PrivilegesRequired=lowest (no admin elevation requested, ever).
@@ -25,7 +24,7 @@
 
 #define AppName "Remote Mic · RC003"
 #define AppPublisher "Remote Mic contributors"
-#define AppVersion "0.1.0-hidtapfix.33"
+#define AppVersion "0.2.0"
 #define AppExeName "RemoteMicRC003.exe"
 #define AppFolder "RC003"
 #define DistDir "..\dist\RemoteMicRC003"

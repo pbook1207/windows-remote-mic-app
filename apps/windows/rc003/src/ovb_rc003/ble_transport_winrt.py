@@ -1,8 +1,8 @@
 """WinRT-based BLE transport: RC003 discovery and the ATVV GATT connection.
 
-Windows-only, and NOT exercised against real hardware in this candidate (no
-device pairing/control happens in this repository or its tests - see the
-project's hard boundary against operating real devices). Importing this
+Windows-only. The 0.2.0 release completed live RC003 pairing, reconnect and
+ATVV voice acceptance; repository automation still never pairs with or
+controls a physical device. Importing this
 module never fails without the optional ``winrt-Windows.*`` packages
 installed; only calling its async functions does, with a clear error.
 
@@ -61,15 +61,13 @@ deterministically-wrong drafts:
   session silently waiting forever - see connection_supervisor.py for how
   app.py turns that into a reconnect.
 
-These signatures are believed correct against the locked wheel's ``.pyi``
-stubs per the review's own citation, but remain UNVERIFIED against a live
-WinRT runtime and real hardware - flagged as a real 待核验 item in
-this package's top-level README.md "Known gaps" section. tests/test_ble_transport_contract.py
+These signatures have been exercised against the locked wheel, a live WinRT
+runtime and real RC003 hardware during 0.2.0 acceptance. tests/test_ble_transport_contract.py
 exercises this module's call shape (method names, argument types, token
 plumbing) against an in-repo fake WinRT projection that mimics the same
 signatures, so at least internal consistency is covered by an automated,
-cross-platform test - not a substitute for real-hardware verification, but
-not nothing either.
+cross-platform test; CI still cannot replace release-time real-hardware
+verification on representative Windows systems.
 
 Threading/blocking (XRBM-014 review RETRY P1 #4 / P2 audio threading): the
 notification callbacks WinRT invokes (``_handle_control_notification``,

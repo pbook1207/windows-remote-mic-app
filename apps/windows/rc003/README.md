@@ -1,12 +1,12 @@
 # Remote Mic — Windows client (RC003)
 
-> **状态：已通过真实硬件验收的源码/构建候选。** 本目录包含
+> **状态：Windows 正式版 0.2.0，已通过真实硬件验收。** 本目录包含
 > 跨平台协议测试，以及针对 WinRT BLE、Raw Input、SendInput 和 PortAudio 的
 > Windows CI/构建流程。CI 可以证明代码能够编译并通过 Windows API 调用契约
-> 测试；此外，本候选已在真实小米蓝牙遥控器 2 Pro / RC003 上验证：方向键、
+> 测试；此外，本版本已在真实小米蓝牙遥控器 2 Pro / RC003 上验证：方向键、
 > OK、Home、Menu、TV、Power、返回、音量+、音量- 全部单次触发，麦克风键可
 > 正常启动豆包输入法并识别语音。
-> 当前产物未签名，也不会自动安装虚拟音频驱动。官方 Windows CI 候选会下载并
+> 当前产物未签名，也不会自动安装虚拟音频驱动。官方 Windows CI 构建会下载并
 > 校验固定版本的 Frida Gadget 后随包携带；源码仓库不保存该二进制，本地自行构建
 > 时仍需显式获取。VB-CABLE 驱动始终只在用户确认后安装（见下文）。
 
@@ -23,8 +23,8 @@ Windows 系统录音输入页面，绝不会启动 RC003 BLE/HID/ATVV 桥接。D
 
 ## 中文安装与使用说明
 
-> 本节面向想要试用这个候选版本的用户；后面的技术说明用于开发者和维护者。
-> 本候选已完成真实 RC003 真机验收（逐键、语音链路）；未签名，首次运行
+> 本节面向安装正式版的用户；后面的技术说明用于开发者和维护者。
+> 0.2.0 已完成真实 RC003 真机验收（逐键、语音链路）；未签名，首次运行
 > 可能触发 SmartScreen 提示。
 
 ### 界面截图
@@ -56,23 +56,18 @@ Windows 系统录音输入页面，绝不会启动 RC003 BLE/HID/ATVV 桥接。D
 
 ### 获取构建产物
 
-首选来源是本仓库的 Releases 列表页——这是列表页本身，不是指向某个具体
-tag 的链接，因此始终是获取最新预发行版的稳定入口，请直接使用这个地址：
+首选来源是本仓库的 Releases 列表页——这是获取最新正式版和历史版本的稳定入口：
 
-  https://github.com/miaomiaozii/windows-remote-mic-app/releases
+  https://github.com/pbook1207/windows-remote-mic-app/releases
 
-在列表中找到本 RC003 Windows 候选对应的预发行版（预发行版会明确标记为
-prerelease，发布说明会写清楚它基于哪一次真实 Windows CI 运行）。
+在列表中找到 `Remote Mic RC003 for Windows 0.2.0`，其 Git 标签为
+`v0.2.0-windows`。发布说明会写清楚对应的 Windows CI 和真机验收范围。
 
-预发行版的仓库级 tag（例如 `v0.3.0-windows-rc003-candidate.1`）只是发布
-编号，和资产文件名里的内部构建版本号是两回事：当前内部构建版本号固定为
-`0.1.0-hidtapfix.33`（HID tap、Typeless 直连、可配置麦克风键直接长按与短按后再次长按两种语音快捷方式、可手动输入或录制语音快捷键、紧凑连接页、虚拟音频设备优先列表、可选统一输入、按需系统麦克风、Vibe Coding 动作库、只读系统默认方案、自定义文本、极简快捷文本菜单、现代编辑器光标定位、桥接自动恢复、可选登录自启动、长按防重复及 CI 完整打包测试版，来自安装器脚本
-`installer/RemoteMicRC003Setup.iss` 的 `AppVersion`）。不要因为
-文件名里的版本号和 tag 不一致就怀疑下载错了文件，具体对应关系以该
-预发行版自己的发布说明为准。
+从 0.2.0 起，程序、安装器、Python 包和资产文件统一使用同一个版本号；
+Git 标签只额外添加 `v` 前缀和 `-windows` 平台后缀。测试候选统一使用
+`<版本>-rc.<序号>`，不再继续使用 `hidtapfix.<序号>`。
 
-每个 RC003 Windows 候选预发行版恰好包含以下三个文件，文件名精确匹配这个模式（下面的
-`<版本号>` 就是上面说的内部构建版本号，不是 tag）：
+每个 RC003 Windows 正式版恰好包含以下三个文件，文件名精确匹配这个模式：
 
 - `RemoteMicRC003Setup-<版本号>-unsigned.exe`——安装器；
 - `RemoteMicRC003-<版本号>-portable-unsigned.zip`——便携版（解压后
@@ -462,13 +457,13 @@ $env:PYTHONPATH = Join-Path (Get-Location) 'src'
 Windows GitHub Actions 工作流位于 `.github/workflows/windows-rc003-ci.yml`。它会
 在构建前下载并校验固定版本的 Frida Gadget，并在 PyInstaller 完成后再次检查成品
 内的文件路径和 SHA-256；任一检查失败都不会上传便携版或安装版。运行结果可在
-<https://github.com/miaomiaozii/windows-remote-mic-app/actions> 查看。CI 没有真实 RC003
+<https://github.com/pbook1207/windows-remote-mic-app/actions> 查看。CI 没有真实 RC003
 硬件，因此构建和测试通过也不能替代真机配对、按键和语音链路验收。
 
 ## 已知限制
 
 - 当前版本未签名，首次运行可能触发 SmartScreen 提示，属预期行为。
-- Frida Gadget 是可选的第三方二进制；官方 Windows CI 候选已随包携带，本地直接
+- Frida Gadget 是可选的第三方二进制；官方 Windows CI 构建已随包携带，本地直接
   从源码构建则必须先执行显式获取脚本。启动后仍须在日志中看到 tap ready 和真实
   按键边沿；UAC 提示是否显示取决于 Windows 当前账户与 UAC 策略。
 - VB-CABLE 是可选的语音路由方案；未安装时语音默认没有虚拟麦克风路由，需要
@@ -477,7 +472,7 @@ Windows GitHub Actions 工作流位于 `.github/workflows/windows-rc003-ci.yml`�
 - Windows 权限页只能打开系统设置页面；Windows 没有一个可供本程序可靠读取的统一
   权限状态 API，因此不会显示虚假的“已授权”。
 - DJI Mic 2 页面目前只提供系统录音输入检查和设置入口；发射器上的录音、连接和电源
-  控件不是本候选承诺的 Windows 可映射按键。
+  控件不是当前 Windows 版本承诺的可映射按键。
 - ATVV 语音延迟与音量、长期重连稳定性仍建议在更多真实场景中继续观察。
 
 ## 隐私、许可证与来源
@@ -496,15 +491,14 @@ Frida Gadget 实现；Frida 的版本、哈希和许可证见仓库根目录
 
 ## 发布说明
 
-Windows 版本以正式版发布。首个正式发布：
+Windows 版本以正式版发布。当前正式发布：
 
-- 发布列表页：<https://github.com/miaomiaozii/windows-remote-mic-app/releases>
-- 正式版 `v0.1.0-windows`：<https://github.com/miaomiaozii/windows-remote-mic-app/releases/tag/v0.1.0-windows>
-- 候选版 `v0.1.0-windows-rc003-candidate.1`（历史）：<https://github.com/miaomiaozii/windows-remote-mic-app/releases/tag/v0.1.0-windows-rc003-candidate.1>
+- 发布列表页：<https://github.com/pbook1207/windows-remote-mic-app/releases>
+- 程序版本：`0.2.0`
+- Git 标签：`v0.2.0-windows`
 
-正式版资产文件名沿用构建流程的内部版本号 `0.1.0-candidate`（见
-`installer/RemoteMicRC003Setup.iss` 的 `AppVersion`）；Release tag 为
-`v0.1.0-windows`。
+正式版资产文件名、安装器 `AppVersion`、Python 包和程序显示版本统一为
+`0.2.0`；测试候选使用 `0.3.0-rc.1` 这类编号，正式发布时去掉 `-rc.<序号>`。
 
 每个版本的安装器、便携版 ZIP 和 `SHA256SUMS.txt` 必须来自同一次 Windows CI
 构建；发布前已在真实 RC003 上完成配对、按键和语音链路验收，并在发布说明中
