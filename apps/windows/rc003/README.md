@@ -6,8 +6,9 @@
 > 测试；此外，本候选已在真实小米蓝牙遥控器 2 Pro / RC003 上验证：方向键、
 > OK、Home、Menu、TV、Power、返回、音量+、音量- 全部单次触发，麦克风键可
 > 正常启动豆包输入法并识别语音。
-> 当前产物未签名，也不会自动安装虚拟音频驱动。Frida Gadget 与 VB-CABLE 均为
-> 可选第三方组件，需要显式获取/安装（见下文）。
+> 当前产物未签名，也不会自动安装虚拟音频驱动。官方 Windows CI 候选会下载并
+> 校验固定版本的 Frida Gadget 后随包携带；源码仓库不保存该二进制，本地自行构建
+> 时仍需显式获取。VB-CABLE 驱动始终只在用户确认后安装（见下文）。
 
 这是本仓库独立维护的 Windows RC003 客户端，面向小米蓝牙遥控器 2 Pro / RC003，
 提供按键映射和 ATVV
@@ -65,7 +66,7 @@ prerelease，发布说明会写清楚它基于哪一次真实 Windows CI 运行�
 
 预发行版的仓库级 tag（例如 `v0.3.0-windows-rc003-candidate.1`）只是发布
 编号，和资产文件名里的内部构建版本号是两回事：当前内部构建版本号固定为
-`0.1.0-hidtapfix.31`（HID tap、Typeless 直连、可手动输入或录制语音快捷键、紧凑连接页、虚拟音频设备优先列表、可选统一输入、按需系统麦克风、Vibe Coding 动作库、只读系统默认方案、自定义文本、极简快捷文本菜单、现代编辑器光标定位、桥接自动恢复、可选登录自启动与长按防重复测试版，来自安装器脚本
+`0.1.0-hidtapfix.32`（HID tap、Typeless 直连、可手动输入或录制语音快捷键、紧凑连接页、虚拟音频设备优先列表、可选统一输入、按需系统麦克风、Vibe Coding 动作库、只读系统默认方案、自定义文本、极简快捷文本菜单、现代编辑器光标定位、桥接自动恢复、可选登录自启动、长按防重复及 CI 完整打包测试版，来自安装器脚本
 `installer/RemoteMicRC003Setup.iss` 的 `AppVersion`）。不要因为
 文件名里的版本号和 tag 不一致就怀疑下载错了文件，具体对应关系以该
 预发行版自己的发布说明为准。
@@ -366,8 +367,8 @@ $env:PYTHONPATH = Join-Path (Get-Location) 'src'
 .\build\build-candidate.ps1
 ```
 
-如果需要恢复 Windows Raw Input 丢失的返回/音量 usages，可在构建前显式获取
-上游 Frida Gadget（不会由构建脚本自动下载）：
+如果需要恢复 Windows Raw Input 丢失的返回/音量 usages，本地自行构建时须在
+构建前显式获取上游 Frida Gadget（`build-candidate.ps1` 不会自动下载）：
 
 ```powershell
 .\build\fetch-frida-gadget.ps1
@@ -454,16 +455,18 @@ $env:PYTHONPATH = Join-Path (Get-Location) 'src'
 .\build\check-public-boundary.ps1
 ```
 
-Windows GitHub Actions 工作流位于 `.github/workflows/windows-rc003-ci.yml`。运行结果
-可在 <https://github.com/miaomiaozii/windows-remote-mic-app/actions> 查看。CI 没有真实 RC003 硬件，
-因此构建和测试通过也不能替代真机配对、按键和语音链路验收。
+Windows GitHub Actions 工作流位于 `.github/workflows/windows-rc003-ci.yml`。它会
+在构建前下载并校验固定版本的 Frida Gadget，并在 PyInstaller 完成后再次检查成品
+内的文件路径和 SHA-256；任一检查失败都不会上传便携版或安装版。运行结果可在
+<https://github.com/miaomiaozii/windows-remote-mic-app/actions> 查看。CI 没有真实 RC003
+硬件，因此构建和测试通过也不能替代真机配对、按键和语音链路验收。
 
 ## 已知限制
 
 - 当前版本未签名，首次运行可能触发 SmartScreen 提示，属预期行为。
-- Frida Gadget 是可选的第三方二进制；没有执行显式获取脚本时，缺失 usages
-  不会被猜测或伪造。执行脚本、从管理员终端启动后，还必须在日志中看到 tap ready 和
-  真实按键边沿。
+- Frida Gadget 是可选的第三方二进制；官方 Windows CI 候选已随包携带，本地直接
+  从源码构建则必须先执行显式获取脚本。启动后仍须在日志中看到 tap ready 和真实
+  按键边沿；UAC 提示是否显示取决于 Windows 当前账户与 UAC 策略。
 - VB-CABLE 是可选的语音路由方案；未安装时语音默认没有虚拟麦克风路由，需要
   用户自行配置输出端点。
 - 遥控器没有独立的物理静音键；语音键的 F5 兼容事件只用于识别，不再作为普通 F5 注入到主机。

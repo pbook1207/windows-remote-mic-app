@@ -1,9 +1,17 @@
 # Changelog — Remote Mic RC003 (Windows)
 
 内部构建版本号固定在 `installer/RemoteMicRC003Setup.iss` 的 `AppVersion`
-（当前 `0.1.0-hidtapfix.31`），仓库级 tag 只作为发布编号，两者对应关系以每条
+（当前 `0.1.0-hidtapfix.32`），仓库级 tag 只作为发布编号，两者对应关系以每条
 发布说明为准。正式版 tag 格式：`v<内部版本>-windows`；候选版为
 `v<内部版本>-windows-rc003-candidate.<序号>`。
+
+## [0.1.0-hidtapfix.32] — 未发布 CI 完整包修复版
+
+- Windows GitHub Actions 在 PyInstaller 构建前显式下载官方 Frida Gadget
+  `17.15.3`，并按固定 SHA-256 校验；下载失败或哈希不符时构建直接失败。
+- PyInstaller 完成后再次检查成品中的 Gadget 路径和 SHA-256，防止打包规则退化后
+  仍上传缺少 HID tap 的便携版或安装版。
+- `.31` 的应用功能不变；新版本号用于与此前未携带 Gadget 的 CI 产物明确区分。
 
 ## [0.1.0-hidtapfix.31] — 未发布语音快捷键录制版
 

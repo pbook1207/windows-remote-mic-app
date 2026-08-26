@@ -18,6 +18,7 @@ _CI_PATH = _REPO_ROOT / ".github" / "workflows" / "windows-rc003-ci.yml"
 _PACKAGE_MAIN_PATH = _RC003_ROOT / "src" / "ovb_rc003" / "__main__.py"
 _LAUNCHER_PATH = _RC003_ROOT / "src" / "launcher.py"
 _BUILD_CANDIDATE_PATH = _RC003_ROOT / "build" / "build-candidate.ps1"
+_FRIDA_FETCH_PATH = _RC003_ROOT / "build" / "fetch-frida-gadget.ps1"
 _README_PATH = _RC003_ROOT / "README.md"
 _INSTALLED_README_PATH = _RC003_ROOT / "installer" / "readme-rc003.txt"
 _ROOT_README_PATH = _REPO_ROOT / "README.md"
@@ -909,6 +910,40 @@ class WindowsCiWorkflowTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", step_text)
         self.assertIn("$LASTEXITCODE", step_text)
 
+    def test_fetches_and_verifies_frida_gadget_before_pyinstaller_build(self):
+        self.assertIn("fetch-frida-gadget.ps1", self.text)
+        fetch_index = self.text.index("fetch-frida-gadget.ps1")
+        pyinstaller_index = self.text.index("PyInstaller build (unsigned candidate)")
+        self.assertLess(fetch_index, pyinstaller_index)
+
+    def test_frida_fetch_step_is_a_required_gate_not_best_effort(self):
+        step_start = self.text.index("- name: Fetch and verify Frida Gadget")
+        next_step_start = self.text.index("- name:", step_start + 1)
+        step_text = self.text[step_start:next_step_start]
+        self.assertNotIn("continue-on-error", step_text)
+        self.assertIn("$LASTEXITCODE", step_text)
+
+    def test_frozen_output_must_contain_the_pinned_frida_gadget(self):
+        verify_start = self.text.index("- name: Verify bundled Frida Gadget")
+        next_step_start = self.text.index("- name:", verify_start + 1)
+        verify_step = self.text[verify_start:next_step_start]
+        self.assertIn(
+            "dist/RemoteMicRC003/_internal/ovb_rc003/frida_assets/"
+            "frida-gadget-17.15.3-windows-x86_64.dll.xz",
+            verify_step,
+        )
+        self.assertIn(
+            "B566D70189B6D551AD8F4E0BEA24DE08A3D4C0F559BB35B2BDB67D45182240C2",
+            verify_step,
+        )
+        self.assertIn("Get-FileHash -Algorithm SHA256", verify_step)
+        self.assertIn("exit 1", verify_step)
+
+        pyinstaller_index = self.text.index("PyInstaller build (unsigned candidate)")
+        dry_run_index = self.text.index("Built-artifact dry-run smoke check")
+        self.assertLess(pyinstaller_index, verify_start)
+        self.assertLess(verify_start, dry_run_index)
+
 
 class BuildCandidateScriptTests(unittest.TestCase):
     def setUp(self):
@@ -929,6 +964,31 @@ class BuildCandidateScriptTests(unittest.TestCase):
         self.assertLess(fetch_index, pyinstaller_index)
         assert_index = self.text.index('Assert-LastExitCode "fetch-vb-cable.ps1"')
         self.assertGreater(assert_index, fetch_index)
+
+
+class FridaPinConsistencyTests(unittest.TestCase):
+    """The runtime, downloader, and CI frozen-output gate must agree on the
+    exact archive identity. Otherwise CI could accept one asset while the
+    installed application rejects it (or vice versa).
+    """
+
+    def setUp(self):
+        self.fetch_script_text = _FRIDA_FETCH_PATH.read_text(encoding="utf-8")
+        self.workflow_text = _CI_PATH.read_text(encoding="utf-8")
+
+    def test_archive_name_matches_runtime_in_fetch_script_and_ci_gate(self):
+        from ovb_rc003 import frida_hid_tap_runtime
+
+        archive_name = frida_hid_tap_runtime.GADGET_ARCHIVE_NAME
+        self.assertIn(archive_name, self.fetch_script_text)
+        self.assertIn(archive_name, self.workflow_text)
+
+    def test_archive_sha256_matches_runtime_in_fetch_script_and_ci_gate(self):
+        from ovb_rc003 import frida_hid_tap_runtime
+
+        expected = frida_hid_tap_runtime.GADGET_ARCHIVE_SHA256.upper()
+        self.assertIn(expected, self.fetch_script_text)
+        self.assertIn(expected, self.workflow_text)
 
 
 class VbCablePinConsistencyTests(unittest.TestCase):
