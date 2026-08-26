@@ -18,7 +18,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         width: 430
-        title: qsTr("录制语音快捷键")
+        title: qsTr("录入语音快捷键")
         standardButtons: Dialog.Cancel
         property string previewText: qsTr("请按下要使用的键盘组合")
         property bool recordsSecondary: false
@@ -70,7 +70,7 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     horizontalAlignment: Text.AlignHCenter
-                    text: qsTr("请直接按下键盘快捷键；左右修饰键会分别记录。录制期间不会执行该快捷键。")
+                    text: qsTr("请直接按下键盘快捷键；左右修饰键会分别记录。录入期间不会执行该快捷键。")
                     color: tokens.textSecondary
                     font.pixelSize: tokens.fontSizeSmall
                 }
@@ -342,7 +342,7 @@ Item {
                             rowSpacing: tokens.spacingSmall
 
                             Label {
-                                text: qsTr("触发方式")
+                                text: qsTr("语音传输方式")
                                 color: tokens.textPrimary
                             }
                             ComboBox {
@@ -352,7 +352,7 @@ Item {
                                 model: SettingsController.triggerModeOptions
                                 currentIndex: SettingsController.triggerModeIndex
                                 onActivated: SettingsController.triggerModeIndex = index
-                                Accessible.name: qsTr("语音触发方式")
+                                Accessible.name: qsTr("语音传输方式")
                             }
 
                             Label {
@@ -363,108 +363,164 @@ Item {
                                 color: tokens.textSecondary
                                 font.pixelSize: tokens.fontSizeSmall
                             }
+                        }
 
-                            Label {
-                                text: qsTr("语音快捷键")
-                                color: tokens.textPrimary
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                TextField {
-                                    id: hotkeyField
-                                    objectName: "hotkeyField"
+                        Label {
+                            Layout.topMargin: tokens.spacingTiny
+                            text: qsTr("麦克风键操作")
+                            font.pixelSize: tokens.fontSizeBody
+                            font.bold: true
+                            color: tokens.textPrimary
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            radius: tokens.cornerRadiusSmall
+                            color: tokens.fieldBackground
+                            border.color: tokens.border
+                            border.width: 1
+                            implicitHeight: primaryVoiceActionColumn.implicitHeight
+                                            + tokens.spacingMedium * 2
+
+                            ColumnLayout {
+                                id: primaryVoiceActionColumn
+                                anchors.fill: parent
+                                anchors.margins: tokens.spacingMedium
+                                spacing: tokens.spacingSmall
+
+                                Label {
+                                    text: qsTr("方式一：直接长按")
+                                    font.bold: true
+                                    color: tokens.textPrimary
+                                }
+                                Label {
                                     Layout.fillWidth: true
-                                    text: SettingsController.hotkeyText
-                                    placeholderText: qsTr("例如：ralt")
-                                    selectByMouse: true
-                                    onEditingFinished: SettingsController.hotkeyText = text
-                                    Accessible.name: qsTr("语音快捷键")
+                                    text: qsTr("按住麦克风键时触发")
+                                    color: tokens.textSecondary
+                                    font.pixelSize: tokens.fontSizeSmall
                                 }
-                                Button {
-                                    id: recordVoiceHotkeyButton
-                                    objectName: "recordVoiceHotkeyButton"
-                                    text: qsTr("录制")
-                                    onClicked: {
-                                        voiceHotkeyRecorder.recordsSecondary = false
-                                        voiceHotkeyRecorder.open()
-                                    }
-                                    Accessible.name: qsTr("录制语音快捷键")
-                                }
-                            }
-
-                            Connections {
-                                target: SettingsController
-                                function onHotkeyTextChanged() {
-                                    hotkeyField.text = SettingsController.hotkeyText
-                                }
-                            }
-
-                            Label {
-                                text: qsTr("第二语音快捷键")
-                                color: tokens.textPrimary
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                TextField {
-                                    id: secondaryHotkeyField
-                                    objectName: "secondaryHotkeyField"
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    text: SettingsController.secondaryHotkeyText
-                                    placeholderText: qsTr("例如：ralt+space；留空则关闭")
-                                    selectByMouse: true
-                                    onEditingFinished: SettingsController.secondaryHotkeyText = text
-                                    Accessible.name: qsTr("第二语音快捷键")
-                                }
-                                Button {
-                                    id: recordSecondaryVoiceHotkeyButton
-                                    objectName: "recordSecondaryVoiceHotkeyButton"
-                                    text: qsTr("录制")
-                                    onClicked: {
-                                        voiceHotkeyRecorder.recordsSecondary = true
-                                        voiceHotkeyRecorder.open()
+                                    Label {
+                                        text: qsTr("快捷键")
+                                        color: tokens.textPrimary
                                     }
-                                    Accessible.name: qsTr("录制第二语音快捷键")
+                                    TextField {
+                                        id: hotkeyField
+                                        objectName: "hotkeyField"
+                                        Layout.fillWidth: true
+                                        text: SettingsController.hotkeyText
+                                        placeholderText: qsTr("例如：ralt")
+                                        selectByMouse: true
+                                        onEditingFinished: SettingsController.hotkeyText = text
+                                        Accessible.name: qsTr("直接长按快捷键")
+                                    }
+                                    Button {
+                                        id: recordVoiceHotkeyButton
+                                        objectName: "recordVoiceHotkeyButton"
+                                        text: qsTr("录入按键")
+                                        onClicked: {
+                                            voiceHotkeyRecorder.recordsSecondary = false
+                                            voiceHotkeyRecorder.open()
+                                        }
+                                        Accessible.name: qsTr("录入直接长按快捷键")
+                                    }
                                 }
                             }
+                        }
 
-                            Label { text: qsTr("第二按键方式"); color: tokens.textPrimary }
-                            CheckBox {
-                                id: secondaryGestureCheck
-                                objectName: "secondaryGestureCheck"
-                                text: qsTr("启用短按后再次长按")
-                                checked: SettingsController.secondaryGestureEnabled
-                                onToggled: SettingsController.secondaryGestureEnabled = checked
-                                Accessible.name: qsTr("启用麦克风键短按后再次长按")
+                        Connections {
+                            target: SettingsController
+                            function onHotkeyTextChanged() {
+                                hotkeyField.text = SettingsController.hotkeyText
                             }
+                        }
 
-                            Connections {
-                                target: SettingsController
-                                function onSecondaryHotkeyTextChanged() {
-                                    secondaryHotkeyField.text = SettingsController.secondaryHotkeyText
+                        Rectangle {
+                            Layout.fillWidth: true
+                            radius: tokens.cornerRadiusSmall
+                            color: tokens.fieldBackground
+                            border.color: tokens.border
+                            border.width: 1
+                            implicitHeight: secondaryVoiceActionColumn.implicitHeight
+                                            + tokens.spacingMedium * 2
+
+                            ColumnLayout {
+                                id: secondaryVoiceActionColumn
+                                anchors.fill: parent
+                                anchors.margins: tokens.spacingMedium
+                                spacing: tokens.spacingSmall
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label {
+                                        text: qsTr("方式二：短按后再次长按")
+                                        font.bold: true
+                                        color: SettingsController.secondaryGestureEnabled
+                                               ? tokens.textPrimary : tokens.disabledText
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    CheckBox {
+                                        id: secondaryGestureCheck
+                                        objectName: "secondaryGestureCheck"
+                                        text: qsTr("启用")
+                                        checked: SettingsController.secondaryGestureEnabled
+                                        onToggled: SettingsController.secondaryGestureEnabled = checked
+                                        Accessible.name: qsTr("启用麦克风键短按后再次长按")
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: qsTr("先短按一次，再次按住时触发")
+                                    color: SettingsController.secondaryGestureEnabled
+                                           ? tokens.textSecondary : tokens.disabledText
+                                    font.pixelSize: tokens.fontSizeSmall
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    enabled: SettingsController.secondaryGestureEnabled
+                                    opacity: enabled ? 1.0 : 0.48
+                                    Label {
+                                        text: qsTr("快捷键")
+                                        color: tokens.textPrimary
+                                    }
+                                    TextField {
+                                        id: secondaryHotkeyField
+                                        objectName: "secondaryHotkeyField"
+                                        Layout.fillWidth: true
+                                        text: SettingsController.secondaryHotkeyText
+                                        placeholderText: qsTr("例如：ralt+space")
+                                        selectByMouse: true
+                                        onEditingFinished: SettingsController.secondaryHotkeyText = text
+                                        Accessible.name: qsTr("短按后再次长按快捷键")
+                                    }
+                                    Button {
+                                        id: recordSecondaryVoiceHotkeyButton
+                                        objectName: "recordSecondaryVoiceHotkeyButton"
+                                        text: qsTr("录入按键")
+                                        onClicked: {
+                                            voiceHotkeyRecorder.recordsSecondary = true
+                                            voiceHotkeyRecorder.open()
+                                        }
+                                        Accessible.name: qsTr("录入短按后再次长按快捷键")
+                                    }
                                 }
                             }
+                        }
 
-                            Label {
-                                Layout.columnSpan: 2
-                                Layout.fillWidth: true
-                                wrapMode: Text.WordWrap
-                                text: qsTr("直接按住使用第一快捷键；短按一次后再次按住使用第二快捷键。两个快捷键都可以修改；取消上方勾选即可关闭第二按键方式。")
-                                color: tokens.textSecondary
-                                font.pixelSize: tokens.fontSizeSmall
+                        Connections {
+                            target: SettingsController
+                            function onSecondaryHotkeyTextChanged() {
+                                secondaryHotkeyField.text = SettingsController.secondaryHotkeyText
                             }
+                        }
 
-                            Label {
-                                Layout.columnSpan: 2
-                                Layout.fillWidth: true
-                                wrapMode: Text.WordWrap
-                                text: triggerModeCombo.currentIndex === 0
-                                      ? qsTr("针对 RC003 的松键时序和防抖优化；当前 Typeless 推荐使用 ralt，也可以手动修改。")
-                                      : triggerModeCombo.currentIndex === 1
-                                        ? qsTr("开始和结束时分别完整点按一次上方快捷键。")
-                                        : qsTr("说话期间持续按住上方快捷键，语音结束后释放。")
-                                color: tokens.textSecondary
-                                font.pixelSize: tokens.fontSizeSmall
-                            }
+                        Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: qsTr("两个快捷键均可修改；快速双击但不长按不会触发。")
+                            color: tokens.textSecondary
+                            font.pixelSize: tokens.fontSizeSmall
                         }
                     }
                 }
