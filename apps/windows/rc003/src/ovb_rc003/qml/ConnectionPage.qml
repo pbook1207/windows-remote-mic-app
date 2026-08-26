@@ -359,7 +359,20 @@ Item {
                                 Layout.columnSpan: 2
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
-                                text: qsTr("RC003 不支持点按后持续录音，需要按住麦克风键才能持续传送声音。这里的点按或按住仅指电脑端快捷键。")
+                                text: triggerModeCombo.currentIndex === 0
+                                      ? qsTr("适用于 Typeless：开始和结束时各点按一次快捷键，并针对右 Alt 的松键时序进行防抖优化。")
+                                      : triggerModeCombo.currentIndex === 1
+                                        ? qsTr("适用于按一次开始、再按一次结束的软件：开始录音和音频结束时各完整点按一次快捷键。")
+                                        : qsTr("适用于必须持续按住快捷键的软件：说话期间保持按下，语音结束后自动释放。")
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+
+                            Label {
+                                Layout.columnSpan: 2
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: qsTr("无论选择哪种传输方式，RC003 都需要按住麦克风键才能持续发送声音；上述区别仅指电脑端如何执行快捷键。")
                                 color: tokens.textSecondary
                                 font.pixelSize: tokens.fontSizeSmall
                             }

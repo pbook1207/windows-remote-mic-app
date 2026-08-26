@@ -123,7 +123,7 @@ _PRESET_KEY_COMBOS = (
 )
 
 _TRIGGER_MODE_LABELS = {
-    key_mapping.VoiceTriggerMode.TYPELESS: "Typeless 专用（推荐）",
+    key_mapping.VoiceTriggerMode.TYPELESS: "Typeless 推荐（防抖优化）",
     key_mapping.VoiceTriggerMode.TOGGLE: "点按快捷键（开始、结束各一次）",
     key_mapping.VoiceTriggerMode.HOLD: "按住快捷键（说话期间保持按下）",
     key_mapping.VoiceTriggerMode.TYPELESS_START_ONLY: "Typeless 排障（只启动，不自动结束）",
