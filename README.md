@@ -9,9 +9,10 @@ Windows 客户端位于 [`apps/windows/rc003`](apps/windows/rc003/README.md)，�
 - 语音输出到用户明确选择的音频端点（配合虚拟声卡供输入法识别）；
 - PySide6/Qt Quick 设置窗口、诊断和 PyInstaller/Inno Setup 构建。
 
-当前正式版 `0.2.0` **已通过真实硬件验收**：已在真实 RC003 遥控器上完成
+当前正式版 `0.2.1` **已通过真实硬件验收**：已在真实 RC003 遥控器上完成
 配对、逐键与语音链路验收（方向/OK/Home/Menu/TV/Power/返回/音量± 全部单次触发，
-麦克风键可启动豆包输入法并识别语音）。产物未签名；CI 和自动构建不能替代真实
+麦克风键可启动语音软件并识别语音）。本版还完成了 H180 本地麦克风与 UU 远程
+虚拟音频设备的自动切换和连续使用测试。产物未签名；CI 和自动构建不能替代真实
 硬件验收。
 
 ## 本仓库的主要更新
@@ -42,15 +43,15 @@ Windows 客户端位于 [`apps/windows/rc003`](apps/windows/rc003/README.md)，�
 
 ## 下载与安装
 
-最新正式版：`0.2.0`（Git 标签 `v0.2.0-windows`）。请从
+最新正式版：`0.2.1`（Git 标签 `v0.2.1-windows`）。请从
 [Releases](https://github.com/pbook1207/windows-remote-mic-app/releases) 页面下载。
 
 从 Release 页面 Assets 下载，二选一：
 
 | 资产 | 适用场景 |
 | --- | --- |
-| `RemoteMicRC003Setup-0.2.0-unsigned.exe` | 推荐，安装到开始菜单/桌面并创建快捷方式 |
-| `RemoteMicRC003-0.2.0-portable-unsigned.zip` | 免安装，解压到任意目录直接运行 |
+| `RemoteMicRC003Setup-0.2.1-unsigned.exe` | 推荐，安装到开始菜单/桌面并创建快捷方式 |
+| `RemoteMicRC003-0.2.1-portable-unsigned.zip` | 免安装，解压到任意目录直接运行 |
 
 两个都未签名，Windows SmartScreen 会提示，点“更多信息 → 仍要运行”即可。
 建议同时下载 `SHA256SUMS.txt` 校验文件哈希。
