@@ -1542,6 +1542,12 @@ class QtSettingsUiSpecTests(unittest.TestCase):
         ):
             self.assertIn(module, hiddenimports)
 
+    def test_spec_rejects_private_icu_and_pins_python_openssl_binaries(self):
+        self.assertIn('_system_icu_binary_names = {"icuuc.dll"}', self.spec_text)
+        self.assertIn('Path(entry[0]).name.lower().startswith("icudt")', self.spec_text)
+        self.assertIn('_python_dll_dir = Path(sys.base_prefix) / "DLLs"', self.spec_text)
+        self.assertIn('"libcrypto-3-x64.dll", "libssl-3-x64.dll"', self.spec_text)
+
     def test_qml_directory_name_matches_qt_settings_app_frozen_lookup(self):
         # Cross-file consistency: the exact "ovb_rc003_qml" folder name must
         # agree between the spec (producer) and qt_settings_app.py's

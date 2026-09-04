@@ -331,9 +331,11 @@ class RawInputButtonListener:
         on_button_event: ButtonEventCallback,
         on_raw_event: Optional[RawInputEventCallback] = None,
         physical_bindings: Optional[Mapping[str, str]] = None,
+        on_keyboard_source_event: Optional[RawInputEventCallback] = None,
     ):
         self._on_button_event = on_button_event
         self._on_raw_event = on_raw_event
+        self._on_keyboard_source_event = on_keyboard_source_event
         self._physical_bindings = dict(physical_bindings or {})
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -369,6 +371,19 @@ class RawInputButtonListener:
         """
 
         self._on_raw_event = callback
+
+    def set_keyboard_source_callback(
+        self, callback: Optional[RawInputEventCallback]
+    ) -> None:
+        """Observe every keyboard Raw Input edge before RC003 path filtering.
+
+        Raw Input registration is process-global for a usage class, so the
+        production bridge must share this existing hidden window instead of
+        registering a second keyboard target.  Only the already-anonymized
+        application callback decides whether an edge is relevant.
+        """
+
+        self._on_keyboard_source_event = callback
 
     @property
     def is_running(self) -> bool:
@@ -885,13 +900,14 @@ class RawInputButtonListener:
         device_path = _get_device_name(user32, header.hDevice, RIDI_DEVICENAME)
         if not device_path:
             return  # could not resolve a device path for this event at all
+        body = bytes(buffer.raw[ctypes.sizeof(RAWINPUTHEADER) :])
+        if header.dwType == RIM_TYPEKEYBOARD:
+            self._emit_keyboard_source_event(body, device_path=device_path)
         if hid_identity.normalize_device_path(device_path) != self._normalized_device_path:
             # Not the exact device path selected at start() - fail-closed
             # per-event scoping (XRBM-014 review round 2 P1 #4), not merely
             # "some RC003-VID/PID device".
             return
-
-        body = bytes(buffer.raw[ctypes.sizeof(RAWINPUTHEADER) :])
 
         if header.dwType == RIM_TYPEKEYBOARD:
             self._handle_keyboard_body(body, device_path=device_path)
@@ -935,6 +951,32 @@ class RawInputButtonListener:
         if button is None:
             return
         self._update_source_button("keyboard", button, is_pressed)
+
+    def _emit_keyboard_source_event(self, body: bytes, *, device_path: str) -> None:
+        callback = self._on_keyboard_source_event
+        if callback is None or len(body) < 16:
+            return
+        import struct
+
+        make_code, flags, _reserved, vkey, message, _extra = struct.unpack_from(
+            "<HHHHII", body, 0
+        )
+        try:
+            callback(
+                RawInputEvent(
+                    source="keyboard",
+                    is_pressed=message not in (0x0101, 0x0105),
+                    vkey=vkey,
+                    make_code=make_code,
+                    flags=flags,
+                    message=message,
+                    device_path=device_path,
+                )
+            )
+        except Exception:
+            # Routing observability must never terminate the shared RC003
+            # button listener.
+            pass
 
     def _handle_hid_body(
         self, body: bytes, *, device_path: Optional[str] = None

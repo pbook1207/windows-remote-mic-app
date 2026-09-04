@@ -173,7 +173,13 @@ def is_cable_input_endpoint(name: str) -> bool:
 def is_cable_output_endpoint(name: str) -> bool:
     """True if ``name`` names VB-CABLE's recording ("CABLE Output") endpoint."""
 
-    return _matches_cable_endpoint(name, CABLE_OUTPUT_NAME)
+    value = name.strip()
+    # PortAudio's legacy MME layer can truncate this long display name before
+    # the closing parenthesis. Treat the bounded canonical prefix as CABLE
+    # Output too, because accidentally probing it creates an audio loop.
+    return _matches_cable_endpoint(value, CABLE_OUTPUT_NAME) or value.startswith(
+        CABLE_OUTPUT_NAME + " ("
+    )
 
 
 def is_dji_mic_2_input_endpoint(name: str) -> bool:

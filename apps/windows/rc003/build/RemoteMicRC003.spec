@@ -94,6 +94,8 @@ hiddenimports = [
     "ovb_rc003.raw_input_windows",
     "ovb_rc003.audio_playback",
     "ovb_rc003.audio_capture_activity_windows",
+    "ovb_rc003.microphone_auto_select",  # level-only multi-mic auto selection
+    "ovb_rc003.system_microphone_gain",  # per-endpoint adaptive input gain
     "ovb_rc003.unified_audio_router",  # opt-in system mic / RC003 priority router
     "ovb_rc003.win32_input",
     "ovb_rc003.connection_supervisor",
@@ -175,6 +177,40 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Qt 6 on Windows deliberately resolves the operating system's ICU shim
+# (System32\icuuc.dll).  Do not freeze an unrelated private ICU beside the
+# executable: a build host may have tools such as Poppler on PATH, and
+# PyInstaller can otherwise mistake that tool's icuuc.dll/icudt*.dll for a
+# Qt dependency.  The mismatched DLL wins the frozen application's search
+# order and makes QtCore fail at startup with a missing
+# UCNV_TO_U_CALLBACK_SUBSTITUTE entry point.
+_system_icu_binary_names = {"icuuc.dll"}
+a.binaries = [
+    entry
+    for entry in a.binaries
+    if not (
+        Path(entry[0]).name.lower() in _system_icu_binary_names
+        or (
+            Path(entry[0]).name.lower().startswith("icudt")
+            and Path(entry[0]).suffix.lower() == ".dll"
+        )
+    )
+]
+
+# The same contaminated PATH can redirect Python's OpenSSL dependencies to
+# another application's same-named DLLs.  Pin those two binaries back to the
+# interpreter that is performing this build.
+_python_dll_dir = Path(sys.base_prefix) / "DLLs"
+_python_openssl_binary_names = {"libcrypto-3-x64.dll", "libssl-3-x64.dll"}
+_repaired_binaries = []
+for entry in a.binaries:
+    destination_name = Path(entry[0]).name.lower()
+    interpreter_binary = _python_dll_dir / destination_name
+    if destination_name in _python_openssl_binary_names and interpreter_binary.is_file():
+        entry = (entry[0], str(interpreter_binary), entry[2])
+    _repaired_binaries.append(entry)
+a.binaries = _repaired_binaries
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

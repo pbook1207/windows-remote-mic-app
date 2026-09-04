@@ -56,6 +56,20 @@ class RecordingListener:
 
 
 class KeyboardBodyTests(unittest.TestCase):
+    def test_keyboard_source_observer_sees_unfiltered_device_edge(self):
+        events = []
+        listener = raw_input_windows.RawInputButtonListener(
+            lambda *_: None, on_keyboard_source_event=events.append
+        )
+        listener._emit_keyboard_source_event(
+            struct.pack("<HHHHII", 0x38, 0x0002, 0, 0xA5, WM_KEYDOWN, 0),
+            device_path=r"\\?\HID#remote-keyboard",
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].device_path, r"\\?\HID#remote-keyboard")
+        self.assertEqual(events[0].vkey, 0xA5)
+        self.assertTrue(events[0].is_pressed)
+
     def test_recognized_vk_down_emits_press(self):
         rec = RecordingListener()
         vk_right = 0x27

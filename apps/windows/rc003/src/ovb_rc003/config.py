@@ -2,11 +2,15 @@
 
 Config root: ``%LOCALAPPDATA%\\RemoteMic\\RC003`` (falls back to the
 user's home directory if ``LOCALAPPDATA`` is unset, e.g. when unit testing on
-non-Windows). Two JSON files live there: ``config.json`` (tuning/behavior) and
-``key_bindings.json`` (per-button actions plus the voice hotkey).
+non-Windows). ``config.json`` stores tuning/behavior,
+``key_bindings.json`` stores per-button actions plus the voice hotkey, and
+the optional automatic-gain profile file stores only microphone display names
+and learned numeric gain values (never audio samples).
 
 Hard privacy rule: neither file may ever contain a real Bluetooth address,
-HID device interface path/GUID, or device token. ``save_config`` and
+HID device interface path/GUID, or device token.  Automatic microphone
+routing may store only install-local salted keyboard-source fingerprints;
+those hashes cannot be reversed into a Raw Input device path. ``save_config`` and
 ``save_key_bindings`` actively refuse to write any of ``FORBIDDEN_KEYS`` -
 this is enforced in code, not just by convention, and is covered by
 tests/test_config.py and tests/test_privacy_contract.py.
@@ -123,6 +127,27 @@ def default_config() -> Dict[str, Any]:
         "unified_on_demand_enabled": True,
         "system_input_endpoint_name": "",
         "system_input_endpoint_host_api": "",
+        # Optional automatic microphone routing. The random install-local
+        # salt makes learned source fingerprints useful only in this config
+        # installation; no Raw Input path or globally correlatable ID is
+        # written to disk. Candidate endpoints contain display names only,
+        # never recorded audio or audio samples.
+        "system_input_auto_select_enabled": False,
+        # Learn a separate software gain for every system microphone. The
+        # RC003 BLE voice path keeps its existing gain_db and is unaffected.
+        "system_input_auto_gain_enabled": True,
+        "system_input_candidate_endpoints": [],
+        "keyboard_source_hash_salt": "",
+        "keyboard_source_profiles": [],
+        # Legacy test.5 fields are retained for a read-compatible migration.
+        # New code folds them into keyboard_source_profiles and does not
+        # require exactly one local and one remote source.
+        "local_keyboard_source_hash": "",
+        "remote_keyboard_source_hash": "",
+        "local_system_input_endpoint_name": "",
+        "local_system_input_endpoint_host_api": "",
+        "remote_system_input_endpoint_name": "",
+        "remote_system_input_endpoint_host_api": "",
     }
 
 

@@ -260,25 +260,81 @@ Item {
                             enabled: SettingsController.unifiedVirtualInputEnabled
                             opacity: enabled ? 1.0 : 0.48
 
-                            Label {
-                                text: qsTr("系统麦克风")
-                                color: tokens.textPrimary
-                                font.pixelSize: tokens.fontSizeBody
+                            CheckBox {
+                                id: systemInputAutoSelectCheck
+                                objectName: "systemInputAutoSelectCheck"
+                                text: qsTr("自动选择系统麦克风（推荐）")
+                                checked: SettingsController.systemInputAutoSelectEnabled
+                                onToggled: SettingsController.systemInputAutoSelectEnabled = checked
+                                Accessible.name: text
                             }
-                            RowLayout {
+                            CheckBox {
+                                id: systemInputAutoGainCheck
+                                objectName: "systemInputAutoGainCheck"
+                                text: qsTr("自动调整麦克风音量（推荐）")
+                                checked: SettingsController.systemInputAutoGainEnabled
+                                onToggled: SettingsController.systemInputAutoGainEnabled = checked
+                                Accessible.name: text
+                            }
+                            Label {
                                 Layout.fillWidth: true
-                                ComboBox {
-                                    id: systemInputCombo
-                                    objectName: "systemInputCombo"
-                                    Layout.fillWidth: true
-                                    model: SettingsController.systemInputOptions
-                                    currentIndex: SettingsController.selectedSystemInputIndex
-                                    onActivated: SettingsController.selectedSystemInputIndex = index
-                                    Accessible.name: qsTr("系统麦克风设备")
+                                wrapMode: Text.WordWrap
+                                text: qsTr("每个麦克风会根据实际声音自动学习独立增益；更换设备不会沿用其他麦克风的音量设置，并会自动限制过强信号。")
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: SettingsController.keyboardSourceRoutingStatusText
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+                            Button {
+                                id: refreshSystemInputEndpointsButton
+                                objectName: "refreshSystemInputEndpointsButton"
+                                text: qsTr("重新扫描麦克风")
+                                onClicked: SettingsController.refreshSystemInputOptions()
+                            }
+                            ColumnLayout {
+                                id: microphoneDeviceSettings
+                                objectName: "microphoneDeviceSettings"
+                                Layout.fillWidth: true
+                                Layout.leftMargin: tokens.spacingLarge + tokens.spacingSmall
+                                spacing: tokens.spacingSmall
+
+                                Label {
+                                    text: SettingsController.systemInputAutoSelectEnabled
+                                          ? qsTr("没有检测到明显声音时使用") : qsTr("系统麦克风")
+                                    color: tokens.textPrimary
+                                    font.pixelSize: tokens.fontSizeBody
                                 }
-                                Button {
-                                    text: qsTr("刷新麦克风")
-                                    onClicked: SettingsController.refreshSystemInputOptions()
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    ComboBox {
+                                        id: systemInputCombo
+                                        objectName: "systemInputCombo"
+                                        Layout.fillWidth: true
+                                        model: SettingsController.systemInputOptions
+                                        currentIndex: SettingsController.selectedSystemInputIndex
+                                        onActivated: SettingsController.selectedSystemInputIndex = index
+                                        Accessible.name: qsTr("系统麦克风设备")
+                                    }
+                                    Button {
+                                        id: showAllSystemInputEndpointsButton
+                                        objectName: "showAllSystemInputEndpointsButton"
+                                        text: SettingsController.showAllSystemInputEndpoints
+                                              ? qsTr("仅显示推荐设备") : qsTr("显示全部设备")
+                                        onClicked: SettingsController.showAllSystemInputEndpoints
+                                                   = !SettingsController.showAllSystemInputEndpoints
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.WordWrap
+                                    text: qsTr("自动模式会把推荐列表中的所有麦克风作为候选；同一个按键来源可以使用多个麦克风，也支持任意数量的键盘或远程控制来源。")
+                                    color: tokens.textSecondary
+                                    font.pixelSize: tokens.fontSizeSmall
                                 }
                             }
                             CheckBox {
@@ -295,7 +351,7 @@ Item {
                             Label {
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
-                                text: qsTr("系统麦克风透明转发；RC003 说话时暂停系统麦克风，结束或异常后自动恢复，不做降噪、变声或混音。")
+                                text: qsTr("系统麦克风透明转发；RC003 说话时暂停系统麦克风，结束或异常后自动恢复。自动增益只调整音量，不做变声或混音。")
                                 color: tokens.textSecondary
                                 font.pixelSize: tokens.fontSizeSmall
                             }

@@ -139,6 +139,80 @@ Item {
                 }
             }
 
+            // Short-lived, privacy-preserving diagnostic only. It does not
+            // change microphone routing yet: its result tells us whether a
+            // later routing rule can safely use keyboard origin or needs an
+            // audio-activity fallback.
+            Rectangle {
+                id: keyOriginDiagnosticCard
+                objectName: "keyOriginDiagnosticCard"
+                Layout.fillWidth: true
+                radius: tokens.cornerRadiusLarge
+                color: tokens.surface
+                border.color: DiagnosticsController.keyOriginResultKind === "error"
+                              ? tokens.errorColor
+                              : DiagnosticsController.keyOriginResultKind === "success"
+                                ? tokens.successColor : tokens.border
+                border.width: 1
+                implicitHeight: keyOriginDiagnosticColumn.implicitHeight
+                                + tokens.spacingLarge * 2
+
+                ColumnLayout {
+                    id: keyOriginDiagnosticColumn
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingLarge
+                    spacing: tokens.spacingSmall
+
+                    Label {
+                        text: qsTr("按键来源对比检测（可重复）")
+                        font.pixelSize: tokens.fontSizeBody
+                        font.bold: true
+                        color: tokens.textPrimary
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: qsTr("一次同时检查硬件输入、低级键盘事件、全局按键状态、Windows 全局热键和前台窗口消息。"
+                            + "使用当前第一语音快捷键，分别采集目标电脑的实体键盘和当前远程控制软件各 5 次；"
+                            + "远程测试前请先点击本设置窗口使其获得焦点。测试快捷键会被临时拦截，"
+                            + "不会启动 Handy、Typeless 或其他软件；"
+                            + "设备路径会立即匿名化，结果不会写入设置或日志。"
+                            + "本项只用于确认任意两个来源能否区分，可针对其他来源重复运行；"
+                            + "自动选择麦克风本身无需先完成该检测。")
+                        color: tokens.textSecondary
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    Label {
+                        id: keyOriginStatusLabel
+                        objectName: "keyOriginStatusLabel"
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: DiagnosticsController.keyOriginStatusText
+                        color: DiagnosticsController.keyOriginResultKind === "error"
+                               ? tokens.errorColor
+                               : DiagnosticsController.keyOriginResultKind === "success"
+                                 ? tokens.successColor : tokens.textPrimary
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    RowLayout {
+                        spacing: tokens.spacingSmall
+                        Button {
+                            id: keyOriginActionButton
+                            objectName: "keyOriginActionButton"
+                            text: DiagnosticsController.keyOriginActionText
+                            onClicked: DiagnosticsController.advanceKeyOriginDiagnostic()
+                        }
+                        Button {
+                            id: keyOriginCancelButton
+                            objectName: "keyOriginCancelButton"
+                            visible: DiagnosticsController.keyOriginActive
+                            text: qsTr("取消")
+                            onClicked: DiagnosticsController.cancelKeyOriginDiagnostic()
+                        }
+                    }
+                }
+            }
+
             // -- Group: ordinary buttons -------------------------------------
             Rectangle {
                 Layout.fillWidth: true
