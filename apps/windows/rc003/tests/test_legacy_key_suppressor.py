@@ -31,6 +31,18 @@ class LegacyKeySuppressorDecisionTests(unittest.TestCase):
         gate = suppressor.LegacyKeySuppressor({0x74})
         self.assertFalse(gate.should_suppress(0x74, suppressor.LLKHF_INJECTED))
 
+    def test_bridge_owned_input_marker_is_distinct_from_physicalizer_marker(self):
+        self.assertTrue(
+            suppressor.is_bridge_owned_input(
+                suppressor.BRIDGE_EVENT_EXTRA_INFO
+            )
+        )
+        self.assertFalse(
+            suppressor.is_bridge_owned_input(
+                suppressor.VOICE_EVENT_EXTRA_INFO
+            )
+        )
+
     def test_physicalizes_only_marked_right_alt_event(self):
         gate = suppressor.LegacyKeySuppressor({0x74})
         event = suppressor.KBDLLHOOKSTRUCT(
@@ -291,6 +303,36 @@ class LegacyKeySuppressorLifecycleTests(unittest.TestCase):
             gate.stop()
 
         self.assertEqual(events, [(0x74, True), (0x74, False)])
+
+    def test_configured_shortcut_observer_uses_worker_and_filters_other_keys(self):
+        release = threading.Event()
+        callback_seen = threading.Event()
+        observed = []
+
+        def on_observed(*event):
+            observed.append(event)
+            callback_seen.set()
+
+        gate = suppressor.LegacyKeySuppressor(
+            {0x74},
+            observe_vk_codes=frozenset({0xA5}),
+            on_key_observed=on_observed,
+        )
+
+        def fake_run():
+            gate._ready_event.set()
+            release.wait(timeout=2.0)
+
+        try:
+            gate.start(_run_target=fake_run)
+            gate._enqueue_observed_key_event(0x0D, 0x1C, 0, True)
+            gate._enqueue_observed_key_event(0xA5, 0x38, 0x11, True)
+            self.assertTrue(callback_seen.wait(timeout=1.0))
+        finally:
+            release.set()
+            gate.stop()
+
+        self.assertEqual(observed, [(0xA5, 0x38, 0x11, True)])
 
 
 if __name__ == "__main__":

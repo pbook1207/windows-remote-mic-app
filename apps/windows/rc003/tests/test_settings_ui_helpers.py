@@ -23,6 +23,7 @@ from ovb_rc003.settings_ui import (
     bridge_endpoint_help,
     build_save_model,
     compact_bridge_endpoint_options,
+    compact_system_input_endpoint_options,
     default_display_state,
     describe_launch_result,
     describe_log_open_result,
@@ -74,6 +75,34 @@ class DisplayRoundTripTests(unittest.TestCase):
                 "Speakers — Windows WASAPI",
                 "CABLE Input — Windows WASAPI",
             ],
+        )
+
+    def test_compact_system_inputs_merge_backends_and_prefer_wasapi(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Laptop Mic", "MME"),
+            audio_output.AudioEndpoint("Laptop Mic", "Windows WASAPI"),
+            audio_output.AudioEndpoint("UU Remote Mic", "Windows DirectSound"),
+            audio_output.AudioEndpoint("UU Remote Mic", "Windows WASAPI"),
+            audio_output.AudioEndpoint("CABLE Output", "Windows WASAPI"),
+        ]
+        self.assertEqual(
+            compact_system_input_endpoint_options(endpoints),
+            [
+                "Laptop Mic — Windows WASAPI",
+                "UU Remote Mic — Windows WASAPI",
+            ],
+        )
+
+    def test_compact_system_inputs_preserve_current_exact_backend(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Laptop Mic", "MME"),
+            audio_output.AudioEndpoint("Laptop Mic", "Windows WASAPI"),
+        ]
+        self.assertEqual(
+            compact_system_input_endpoint_options(
+                endpoints, current_display="Laptop Mic — MME"
+            ),
+            ["Laptop Mic — MME"],
         )
 
     def test_bridge_endpoint_help_is_specific_for_vb_cable_and_generic_otherwise(self):
@@ -459,6 +488,75 @@ class BuildSaveModelTests(unittest.TestCase):
                 unified_virtual_input_enabled=True,
                 system_input_endpoint_display_text="CABLE Output — Windows WASAPI",
             )
+
+    def test_auto_routing_persists_all_recommended_microphone_candidates(self):
+        base_config = dict(self.base_config)
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="ralt",
+            trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+            endpoint_display_text="CABLE Input — Windows WASAPI",
+            base_config=base_config,
+            base_bindings=self.base_bindings,
+            unified_virtual_input_enabled=True,
+            system_input_endpoint_display_text="Built-in Mic — Windows WASAPI",
+            system_input_auto_select_enabled=True,
+            system_input_candidate_display_texts=[
+                "Built-in Mic — Windows WASAPI",
+                "Built-in Mic — MME",
+                "UU Remote Mic — Windows WASAPI",
+                "CABLE Output — Windows WASAPI",
+            ],
+        )
+        self.assertTrue(new_config["system_input_auto_select_enabled"])
+        self.assertEqual(
+            new_config["system_input_candidate_endpoints"],
+            [
+                {"name": "Built-in Mic", "host_api": "Windows WASAPI"},
+                {"name": "UU Remote Mic", "host_api": "Windows WASAPI"},
+            ],
+        )
+
+    def test_system_microphone_auto_gain_is_enabled_by_default_and_can_be_disabled(self):
+        enabled_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="ralt",
+            trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+        )
+        self.assertTrue(enabled_config["system_input_auto_gain_enabled"])
+
+        disabled_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="ralt",
+            trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            system_input_auto_gain_enabled=False,
+        )
+        self.assertFalse(disabled_config["system_input_auto_gain_enabled"])
+
+    def test_source_routing_does_not_require_prelearned_keyboard_sources(self):
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="ralt",
+            trigger_mode=key_mapping.VoiceTriggerMode.HOLD,
+            endpoint_display_text="CABLE Input — Windows WASAPI",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            unified_virtual_input_enabled=True,
+            system_input_endpoint_display_text=(
+                "Built-in Mic — Windows WASAPI"
+            ),
+            system_input_auto_select_enabled=True,
+            system_input_candidate_display_texts=[
+                "Built-in Mic — Windows WASAPI"
+            ],
+        )
+        self.assertTrue(new_config["system_input_auto_select_enabled"])
 
     def test_does_not_mutate_base_dicts(self):
         base_config_copy = dict(self.base_config)

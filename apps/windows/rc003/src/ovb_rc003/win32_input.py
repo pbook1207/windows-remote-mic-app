@@ -39,7 +39,10 @@ from ctypes import wintypes
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import win32_keys
-from .legacy_key_suppressor_windows import VOICE_EVENT_EXTRA_INFO
+from .legacy_key_suppressor_windows import (
+    BRIDGE_EVENT_EXTRA_INFO,
+    VOICE_EVENT_EXTRA_INFO,
+)
 
 _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
@@ -178,7 +181,7 @@ def _build_input_array(events: Sequence[Tuple[int, bool]]):
                 wScan=scan_code,
                 dwFlags=flags,
                 time=0,
-                dwExtraInfo=0,
+                dwExtraInfo=BRIDGE_EVENT_EXTRA_INFO,
             )
         else:
             keybd_input = KEYBDINPUT(
@@ -186,7 +189,7 @@ def _build_input_array(events: Sequence[Tuple[int, bool]]):
                 wScan=0,
                 dwFlags=flags,
                 time=0,
-                dwExtraInfo=0,
+                dwExtraInfo=BRIDGE_EVENT_EXTRA_INFO,
             )
         array[index] = INPUT(type=_INPUT_KEYBOARD, union=_INPUT_UNION(ki=keybd_input))
     return array, INPUT

@@ -74,6 +74,9 @@ class InputStructShapeTests(unittest.TestCase):
             keybd.dwFlags,
             win32_input._KEYEVENTF_SCANCODE | win32_input._KEYEVENTF_EXTENDEDKEY,
         )
+        self.assertEqual(
+            keybd.dwExtraInfo, win32_input.BRIDGE_EVENT_EXTRA_INFO
+        )
 
     def test_left_ctrl_uses_a_non_extended_physical_scan_code(self):
         array, _ = win32_input._build_input_array(

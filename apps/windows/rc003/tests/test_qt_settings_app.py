@@ -36,6 +36,7 @@ from ovb_rc003 import (
     config,
     device_catalog,
     hotkey,
+    key_origin_probe_windows,
     key_mapping,
     qt_settings_app,
     remote_layout,
@@ -115,6 +116,44 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
         )
         self.assertIn("没有软件使用时，关闭电脑麦克风", source)
         self.assertIn("SettingsController.selectedEndpointSupportsOnDemand", source)
+
+    def test_connection_page_defaults_to_recommended_microphones_with_escape_hatch(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "showAllSystemInputEndpointsButton"', source)
+        self.assertIn('objectName: "refreshSystemInputEndpointsButton"', source)
+        self.assertIn("重新扫描麦克风", source)
+        self.assertIn("自动模式会把推荐列表中的所有麦克风作为候选", source)
+
+    def test_connection_page_exposes_simple_automatic_microphone_routing(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "ConnectionPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "systemInputAutoSelectCheck"', source)
+        self.assertIn('objectName: "microphoneDeviceSettings"', source)
+        self.assertNotIn('objectName: "advancedMicrophoneSettingsButton"', source)
+        self.assertNotIn("advancedMicrophoneSettingsExpanded", source)
+        self.assertIn("自动选择系统麦克风（推荐）", source)
+        self.assertIn('objectName: "systemInputAutoGainCheck"', source)
+        self.assertIn("自动调整麦克风音量（推荐）", source)
+        self.assertIn("SettingsController.systemInputAutoGainEnabled", source)
+        self.assertIn("同一个按键来源可以使用多个麦克风", source)
+        self.assertNotIn('objectName: "localSystemInputCombo"', source)
+        self.assertNotIn('objectName: "remoteSystemInputCombo"', source)
+
+    def test_diagnostics_page_exposes_private_key_origin_test(self):
+        source = (
+            Path(qt_settings_app.__file__).resolve().parent / "qml" / "DiagnosticsPage.qml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('objectName: "keyOriginDiagnosticCard"', source)
+        self.assertIn('objectName: "keyOriginActionButton"', source)
+        self.assertIn("advanceKeyOriginDiagnostic()", source)
+        self.assertIn("不会写入设置或日志", source)
+        self.assertIn("按键来源对比检测（可重复）", source)
+        self.assertIn("可针对其他来源重复运行", source)
+        self.assertIn("自动选择麦克风本身无需先完成该检测", source)
+        self.assertNotIn("UU 远程", source)
 
     def test_connection_page_supports_manual_and_recorded_voice_hotkeys(self):
         source = (
@@ -597,6 +636,34 @@ class SettingsControllerTests(unittest.TestCase):
             self.assertIn("Speakers — Windows WASAPI", controller.endpointOptions)
             self.assertIn("CABLE Input — MME", controller.endpointOptions)
 
+    def test_system_input_list_is_compact_first_with_an_explicit_show_all_escape_hatch(self):
+        endpoints = [
+            audio_output.AudioEndpoint("Laptop Mic", "MME"),
+            audio_output.AudioEndpoint("Laptop Mic", "Windows WASAPI"),
+            audio_output.AudioEndpoint("UU Remote Mic", "Windows DirectSound"),
+            audio_output.AudioEndpoint("UU Remote Mic", "Windows WASAPI"),
+            audio_output.AudioEndpoint("CABLE Output", "Windows WASAPI"),
+        ]
+        with mock.patch.object(
+            audio_output, "enumerate_input_endpoints", return_value=endpoints
+        ):
+            controller, _ = self._make_controller()
+            self.assertEqual(
+                controller.systemInputOptions,
+                [
+                    "Laptop Mic — Windows WASAPI",
+                    "UU Remote Mic — Windows WASAPI",
+                ],
+            )
+            controller.showAllSystemInputEndpoints = True
+            self.assertIn("Laptop Mic — MME", controller.systemInputOptions)
+            self.assertIn(
+                "UU Remote Mic — Windows DirectSound", controller.systemInputOptions
+            )
+            self.assertFalse(
+                any("CABLE Output" in option for option in controller.systemInputOptions)
+            )
+
     def test_selecting_a_custom_endpoint_disables_cable_only_on_demand_detection(self):
         endpoints = [
             audio_output.AudioEndpoint("CABLE Input", "Windows WASAPI"),
@@ -1024,6 +1091,189 @@ class DiagnosticsControllerTests(unittest.TestCase):
         ids = {row["checkId"] for row in diag.checkResults}
         self.assertIn("dictation", ids)
 
+    def test_key_origin_diagnostic_compares_local_and_remote_without_persisting(self):
+        probes = []
+
+        class FakeProbe:
+            def __init__(self, chord_text, on_event):
+                self.chord_text = chord_text
+                self.on_event = on_event
+                self.stopped = False
+                probes.append(self)
+
+            def start(self):
+                return None
+
+            def stop(self):
+                self.stopped = True
+
+        settings_controller = self._make_settings_controller()
+        settings_controller.hotkeyText = "ralt"
+        diag = self.DiagnosticsController(settings_controller, self._config_root)
+        self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
+
+        with mock.patch.object(
+            key_origin_probe_windows, "KeyOriginProbe", FakeProbe
+        ):
+            diag.advanceKeyOriginDiagnostic()
+            self.assertEqual(diag.keyOriginState, "local")
+            self.assertEqual(probes[0].chord_text, "ralt")
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.LowLevelOriginEvent(
+                        "ralt", False, False, 0x38, True, index
+                    )
+                )
+                self.app.processEvents()
+            diag.advanceKeyOriginDiagnostic()
+            self.assertEqual(diag.keyOriginState, "remote")
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.LowLevelOriginEvent(
+                        "ralt", True, False, 0x38, True, 10 + index
+                    )
+                )
+                self.app.processEvents()
+            diag.advanceKeyOriginDiagnostic()
+
+        self.assertTrue(probes[0].stopped)
+        self.assertEqual(diag.keyOriginState, "done")
+        self.assertEqual(diag.keyOriginResultKind, "success")
+        self.assertIn("可以区分", diag.keyOriginStatusText)
+        # The diagnostic is deliberately observational; it never changes
+        # the user's selected shortcut or writes a routing decision.
+        self.assertEqual(settings_controller.hotkeyText, "ralt")
+
+    def test_key_origin_diagnostic_accepts_raw_only_local_progress(self):
+        probes = []
+
+        class FakeProbe:
+            def __init__(self, chord_text, on_event):
+                self.on_event = on_event
+                probes.append(self)
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        settings_controller = self._make_settings_controller()
+        settings_controller.hotkeyText = "ralt"
+        diag = self.DiagnosticsController(settings_controller, self._config_root)
+        self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
+
+        with mock.patch.object(
+            key_origin_probe_windows, "KeyOriginProbe", FakeProbe
+        ):
+            diag.advanceKeyOriginDiagnostic()
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.RawOriginEvent(
+                        "ralt", "physical-keyboard", 0x38, True, index
+                    )
+                )
+                self.app.processEvents()
+
+            self.assertIn("5/5", diag.keyOriginStatusText)
+            self.assertIn("硬件通道 5", diag.keyOriginStatusText)
+            self.assertIn("系统通道 0", diag.keyOriginStatusText)
+            self.assertIn("按键状态 0", diag.keyOriginStatusText)
+            diag.advanceKeyOriginDiagnostic()
+
+        self.assertEqual(diag.keyOriginState, "remote")
+
+    def test_key_origin_diagnostic_accepts_async_only_remote_progress(self):
+        probes = []
+
+        class FakeProbe:
+            def __init__(self, chord_text, on_event):
+                self.on_event = on_event
+                probes.append(self)
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        settings_controller = self._make_settings_controller()
+        settings_controller.hotkeyText = "ralt"
+        diag = self.DiagnosticsController(settings_controller, self._config_root)
+        self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
+
+        with mock.patch.object(
+            key_origin_probe_windows, "KeyOriginProbe", FakeProbe
+        ):
+            diag.advanceKeyOriginDiagnostic()
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.RawOriginEvent(
+                        "ralt", "physical-keyboard", 0x38, True, index
+                    )
+                )
+                self.app.processEvents()
+            diag.advanceKeyOriginDiagnostic()
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.AsyncOriginEvent("ralt", 10 + index)
+                )
+                self.app.processEvents()
+
+            self.assertIn("5/5", diag.keyOriginStatusText)
+            self.assertIn("按键状态 5", diag.keyOriginStatusText)
+            diag.advanceKeyOriginDiagnostic()
+
+        self.assertEqual(diag.keyOriginState, "done")
+        self.assertEqual(diag.keyOriginResultKind, "success")
+        self.assertIn("可以区分", diag.keyOriginStatusText)
+
+    def test_key_origin_diagnostic_reports_foreground_only_remote_limit(self):
+        probes = []
+
+        class FakeProbe:
+            def __init__(self, chord_text, on_event):
+                self.on_event = on_event
+                probes.append(self)
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        settings_controller = self._make_settings_controller()
+        settings_controller.hotkeyText = "ralt"
+        diag = self.DiagnosticsController(settings_controller, self._config_root)
+        self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
+
+        with mock.patch.object(
+            key_origin_probe_windows, "KeyOriginProbe", FakeProbe
+        ):
+            diag.advanceKeyOriginDiagnostic()
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.RawOriginEvent(
+                        "ralt", "physical-keyboard", 0x38, True, index
+                    )
+                )
+                self.app.processEvents()
+            diag.advanceKeyOriginDiagnostic()
+            for index in range(5):
+                probes[0].on_event(
+                    key_origin_probe_windows.ForegroundOriginEvent(
+                        "ralt", 10 + index
+                    )
+                )
+                self.app.processEvents()
+
+            self.assertIn("前台窗口 5", diag.keyOriginStatusText)
+            diag.advanceKeyOriginDiagnostic()
+
+        self.assertEqual(diag.keyOriginState, "done")
+        self.assertEqual(diag.keyOriginResultKind, "warning")
+        self.assertIn("后台桥接无法", diag.keyOriginStatusText)
+
     def test_check_results_never_contain_a_placeholder_raw_path_or_address(self):
         settings_controller = self._make_settings_controller()
         diag = self.DiagnosticsController(settings_controller, self._config_root)
@@ -1424,7 +1674,7 @@ class RunSettingsWindowShutdownCoverageTests(unittest.TestCase):
 
         class _FakeApp:
             def __init__(self, argv=None):
-                pass
+                self.event_filter = None
 
             @staticmethod
             def instance():
@@ -1432,6 +1682,13 @@ class RunSettingsWindowShutdownCoverageTests(unittest.TestCase):
 
             def exec(self):
                 return exec_return
+
+            def installEventFilter(self, event_filter):
+                self.event_filter = event_filter
+
+            def removeEventFilter(self, event_filter):
+                if self.event_filter is event_filter:
+                    self.event_filter = None
 
         class _FakeQQuickStyle:
             @staticmethod

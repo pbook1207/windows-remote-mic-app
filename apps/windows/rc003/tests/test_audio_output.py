@@ -108,6 +108,13 @@ class CableEndpointMatchingTests(unittest.TestCase):
         # closes the parenthesis is not a real host-API decoration.
         self.assertFalse(audio_output.is_cable_input_endpoint("CABLE Input (unterminated"))
 
+    def test_truncated_cable_output_is_still_rejected_as_feedback_source(self):
+        self.assertTrue(
+            audio_output.is_cable_output_endpoint(
+                "CABLE Output (VB-Audio Virtual"
+            )
+        )
+
 
 class EnumerateEndpointsWithoutSounddeviceTests(unittest.TestCase):
     """Both enumerate_output_endpoints() and enumerate_input_endpoints() must

@@ -1067,6 +1067,154 @@ class CrossThreadReconnectTests(_AppWiringTestCase):
         self.assertNotEqual(reconnect_calls[0], threading.main_thread())
 
 
+class KeyboardSourceMicrophoneRoutingTests(_AppWiringTestCase):
+    class _Router:
+        def __init__(self):
+            self.requests = []
+
+        def request_automatic_system_input(
+            self, source_hash, candidates, *, fallback=None
+        ):
+            self.requests.append((source_hash, tuple(candidates), fallback))
+            return True
+
+    @staticmethod
+    def _right_alt_event(device_path, is_pressed=True):
+        return raw_input_windows.RawInputEvent(
+            source="keyboard",
+            is_pressed=is_pressed,
+            vkey=0xA5,
+            make_code=0x38,
+            flags=0x0002,
+            message=0x0100 if is_pressed else 0x0101,
+            device_path=device_path,
+        )
+
+    def test_any_keyboard_source_requests_live_microphone_selection_once_per_press(self):
+        router = self._Router()
+        salt = "install-local-test-salt"
+        remote_path = r"\\?\HID#remote-keyboard"
+        self.app._unified_audio_router = router
+        self.app._keyboard_source_auto_enabled = True
+        self.app._keyboard_source_salt = salt
+        self.app._automatic_system_input_candidates = [
+            app_module.audio_output.AudioEndpoint(
+                "Built-in Mic", "Windows WASAPI"
+            ),
+            app_module.audio_output.AudioEndpoint(
+                "UU Remote Mic", "Windows WASAPI"
+            ),
+        ]
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        expected_hash = (
+            app_module.key_origin_probe_windows.anonymous_device_fingerprint(
+                remote_path, salt=salt
+            )
+        )
+
+        down = self._right_alt_event(remote_path)
+        self.app._on_keyboard_source_event(down)
+        self.app._on_keyboard_source_event(down)
+
+        self.assertEqual(len(router.requests), 1)
+        self.assertEqual(router.requests[0][0], expected_hash)
+        self.assertEqual(len(router.requests[0][1]), 2)
+        self.assertEqual(
+            {item.name for item in router.requests[0][1]},
+            {"Built-in Mic", "UU Remote Mic"},
+        )
+
+    def test_unlearned_source_is_supported_without_local_remote_slots(self):
+        router = self._Router()
+        self.app._unified_audio_router = router
+        self.app._keyboard_source_auto_enabled = True
+        self.app._keyboard_source_salt = "install-local-test-salt"
+        self.app._automatic_system_input_candidates = [
+            app_module.audio_output.AudioEndpoint(
+                "Fallback Mic", "Windows WASAPI"
+            )
+        ]
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+
+        self.app._on_keyboard_source_event(
+            self._right_alt_event(r"\\?\HID#unknown-keyboard")
+        )
+
+        self.assertEqual(len(router.requests), 1)
+        self.assertEqual(router.requests[0][1][0].name, "Fallback Mic")
+
+    def test_low_level_shortcut_fallback_handles_physical_or_remote_ralt(self):
+        router = self._Router()
+        self.app._unified_audio_router = router
+        self.app._keyboard_source_auto_enabled = True
+        self.app._automatic_system_input_candidates = [
+            app_module.audio_output.AudioEndpoint(
+                "H180 Plus Microphone", "Windows WASAPI"
+            ),
+            app_module.audio_output.AudioEndpoint(
+                "UU Remote Virtual Mic", "Windows WASAPI"
+            ),
+        ]
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TYPELESS
+
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x01, True)
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x01, True)
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x81, False)
+        # The second tap closes Typeless and must not choose another mic.
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x11, True)
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x91, False)
+        # A later injected opening tap represents remote-control software.
+        self.app._on_low_level_voice_hotkey_event(0xA5, 0x38, 0x11, True)
+
+        self.assertEqual(len(router.requests), 2)
+        self.assertEqual(router.requests[0][0], "shortcut:unknown:ralt")
+        self.assertEqual(len(router.requests[0][1]), 2)
+        self.assertIsNone(router.requests[0][2])
+        self.assertEqual(router.requests[1][0], "shortcut:injected:ralt")
+        self.assertEqual(router.requests[1][2].name, "UU Remote Virtual Mic")
+
+    def test_hook_observes_only_configured_voice_trigger_vk(self):
+        self.app._keyboard_source_auto_enabled = True
+        self.app._voice_hotkey = app_module.hotkey.HotkeySpec.parse("ralt")
+        self.assertEqual(
+            self.app._automatic_voice_trigger_vk_codes(), frozenset({0xA5})
+        )
+
+    def test_bridge_initialization_never_enumerates_audio_before_winrt_ble(self):
+        root = Path(self._tmp.name)
+        document = config.default_config()
+        document.update(
+            {
+                "unified_virtual_input_enabled": True,
+                "system_input_auto_select_enabled": True,
+                "output_endpoint_name": "CABLE Input",
+                "output_endpoint_host_api": "Windows WASAPI",
+                "system_input_endpoint_name": "Built-in Mic",
+                "system_input_endpoint_host_api": "Windows WASAPI",
+                "keyboard_source_hash_salt": "install-local-salt",
+                "system_input_candidate_endpoints": [
+                    {
+                        "name": "Built-in Mic",
+                        "host_api": "Windows WASAPI",
+                    }
+                ],
+            }
+        )
+        config.save_config(config.config_path(root), document)
+        with mock.patch.object(
+            app_module.audio_output,
+            "enumerate_input_endpoints",
+            side_effect=AssertionError("audio enumeration touched BLE main thread"),
+        ):
+            built = _build_app(root)
+        self.assertTrue(built._keyboard_source_auto_enabled)
+        self.assertEqual(
+            built._automatic_system_input_candidates[0].name,
+            "Built-in Mic",
+        )
+
+
 class CleanupOwnershipTests(_AppWiringTestCase):
     """XRBM-019 P1 #2/#5: _cleanup_once() must attempt every one of the
     four steps (voice, HID, BLE, playback) regardless of any single step's

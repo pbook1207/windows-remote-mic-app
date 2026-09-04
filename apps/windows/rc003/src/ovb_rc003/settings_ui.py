@@ -40,6 +40,7 @@ from . import (
     hotkey,
     key_mapping,
     logging_setup,
+    microphone_auto_select,
     win32_keys,
 )
 
@@ -228,6 +229,47 @@ def compact_bridge_endpoint_options(
     return options
 
 
+def compact_system_input_endpoint_options(
+    endpoints: Sequence[audio_output.AudioEndpoint],
+    *,
+    current_display: str = "",
+) -> list[str]:
+    """Return one recommended Windows interface per microphone device.
+
+    PortAudio commonly reports the same recording device through Windows
+    WASAPI, DirectSound, MME and WDM-KS.  Showing every backend makes the
+    microphone picker look like it contains many more physical devices than
+    it really does.  The compact list keeps one entry per endpoint name,
+    preferring WASAPI, while preserving the user's current exact selection.
+
+    This is presentation only: it is not a fixed microphone priority and the
+    explicit "show all" UI remains the lossless escape hatch.
+    """
+
+    selected = microphone_auto_select.recommended_candidates(endpoints)
+    current_name, current_host_api = _parse_endpoint_display(current_display)
+    current_endpoint = next(
+        (
+            endpoint
+            for endpoint in endpoints
+            if endpoint.name == current_name
+            and endpoint.host_api == current_host_api
+        ),
+        None,
+    )
+    if current_endpoint is not None:
+        selected = [
+            current_endpoint
+            if endpoint.name.casefold() == current_endpoint.name.casefold()
+            else endpoint
+            for endpoint in selected
+        ]
+    options = [_endpoint_display(endpoint) for endpoint in selected]
+    if current_display and current_display not in options:
+        options.insert(0, current_display)
+    return options
+
+
 def bridge_endpoint_help(display_text: str) -> str:
     """User-facing pairing guidance for the selected playback endpoint."""
 
@@ -366,6 +408,11 @@ def build_save_model(
     unified_virtual_input_enabled: Optional[bool] = None,
     unified_on_demand_enabled: Optional[bool] = None,
     system_input_endpoint_display_text: Optional[str] = None,
+    system_input_auto_select_enabled: Optional[bool] = None,
+    system_input_auto_gain_enabled: Optional[bool] = None,
+    system_input_candidate_display_texts: Optional[Sequence[str]] = None,
+    local_system_input_endpoint_display_text: Optional[str] = None,
+    remote_system_input_endpoint_display_text: Optional[str] = None,
     secondary_hotkey_text: Optional[str] = None,
     secondary_gesture_enabled: Optional[bool] = None,
 ) -> Tuple[dict, dict]:
@@ -483,6 +530,53 @@ def build_save_model(
         system_input_name, system_input_host_api = _parse_endpoint_display(
             system_input_endpoint_display_text
         )
+    auto_select_enabled = (
+        bool(base_config.get("system_input_auto_select_enabled", False))
+        if system_input_auto_select_enabled is None
+        else bool(system_input_auto_select_enabled)
+    )
+    auto_gain_enabled = (
+        bool(base_config.get("system_input_auto_gain_enabled", True))
+        if system_input_auto_gain_enabled is None
+        else bool(system_input_auto_gain_enabled)
+    )
+
+    def _source_endpoint(display_text: Optional[str], prefix: str):
+        if display_text is None:
+            return (
+                str(base_config.get(f"{prefix}_system_input_endpoint_name", "")),
+                str(base_config.get(f"{prefix}_system_input_endpoint_host_api", "")),
+            )
+        return _parse_endpoint_display(display_text)
+
+    local_input_name, local_input_host_api = _source_endpoint(
+        local_system_input_endpoint_display_text, "local"
+    )
+    remote_input_name, remote_input_host_api = _source_endpoint(
+        remote_system_input_endpoint_display_text, "remote"
+    )
+    if system_input_candidate_display_texts is None:
+        candidate_endpoints = microphone_auto_select.normalize_configured_candidates(
+            base_config.get("system_input_candidate_endpoints", [])
+        )
+    else:
+        parsed_candidates = [
+            _parse_endpoint_display(str(display))
+            for display in system_input_candidate_display_texts
+        ]
+        candidate_endpoints = microphone_auto_select.recommended_candidates(
+            audio_output.AudioEndpoint(name, host_api)
+            for name, host_api in parsed_candidates
+            if name
+        )
+    if system_input_name and not any(
+        endpoint.name == system_input_name
+        and endpoint.host_api == system_input_host_api
+        for endpoint in candidate_endpoints
+    ):
+        candidate_endpoints.insert(
+            0, audio_output.AudioEndpoint(system_input_name, system_input_host_api)
+        )
     if unified_enabled:
         if not endpoint_name:
             raise SettingsValidationError(None, "请先选择要桥接到的虚拟音频设备。")
@@ -491,6 +585,10 @@ def build_save_model(
         if audio_output.is_cable_output_endpoint(system_input_name):
             raise SettingsValidationError(
                 None, "系统麦克风不能选择 CABLE Output，否则会形成音频回路。"
+            )
+        if auto_select_enabled and not candidate_endpoints:
+            raise SettingsValidationError(
+                None, "没有找到可用于自动选择的系统麦克风，请刷新设备后重试。"
             )
 
     new_config = dict(base_config)
@@ -514,6 +612,15 @@ def build_save_model(
     )
     new_config["system_input_endpoint_name"] = system_input_name
     new_config["system_input_endpoint_host_api"] = system_input_host_api
+    new_config["system_input_auto_select_enabled"] = auto_select_enabled
+    new_config["system_input_auto_gain_enabled"] = auto_gain_enabled
+    new_config["system_input_candidate_endpoints"] = (
+        microphone_auto_select.serialize_candidates(candidate_endpoints)
+    )
+    new_config["local_system_input_endpoint_name"] = local_input_name
+    new_config["local_system_input_endpoint_host_api"] = local_input_host_api
+    new_config["remote_system_input_endpoint_name"] = remote_input_name
+    new_config["remote_system_input_endpoint_host_api"] = remote_input_host_api
 
     new_bindings = dict(base_bindings)
     new_bindings["bindings"] = bindings

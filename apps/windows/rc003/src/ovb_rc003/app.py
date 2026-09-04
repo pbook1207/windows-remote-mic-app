@@ -72,10 +72,13 @@ from . import (
     frida_compat,
     hid_identity,
     hotkey,
+    hotkey_capture_windows,
     identity,
+    key_origin_probe_windows,
     key_mapping,
     legacy_key_suppressor_windows,
     logging_setup,
+    microphone_auto_select,
     raw_input_windows,
     text_menu_overlay,
     unified_audio_router,
@@ -213,6 +216,45 @@ class RC003App:
         self._unified_audio_router: Optional[
             unified_audio_router.UnifiedAudioRouter
         ] = None
+        self._keyboard_source_pressed: set[tuple[str, int, int]] = set()
+        self._automatic_fallback_key_pressed = False
+        self._automatic_shortcut_session_active = False
+        self._automatic_closing_until = 0.0
+        self._keyboard_source_auto_enabled = bool(
+            self._config.get("system_input_auto_select_enabled", False)
+        )
+        self._keyboard_source_salt = str(
+            self._config.get("keyboard_source_hash_salt", "")
+        )
+        self._local_keyboard_source_hash = str(
+            self._config.get("local_keyboard_source_hash", "")
+        )
+        self._remote_keyboard_source_hash = str(
+            self._config.get("remote_keyboard_source_hash", "")
+        )
+        self._automatic_system_input_candidates = (
+            microphone_auto_select.normalize_configured_candidates(
+                self._config.get("system_input_candidate_endpoints", [])
+            )
+        )
+        # Do not enumerate PortAudio/WASAPI devices on this main thread.
+        # RC003 BLE uses WinRT on the same thread, and initializing the audio
+        # stack here can prevent the later GATT connection from completing.
+        # The settings process performs discovery and persists candidates.
+        fallback_input = audio_output.AudioEndpoint(
+            str(self._config.get("system_input_endpoint_name", "")),
+            str(self._config.get("system_input_endpoint_host_api", "")),
+        )
+        if (
+            fallback_input.name
+            and not audio_output.is_cable_output_endpoint(fallback_input.name)
+            and microphone_auto_select.endpoint_key(fallback_input)
+            not in {
+                microphone_auto_select.endpoint_key(endpoint)
+                for endpoint in self._automatic_system_input_candidates
+            }
+        ):
+            self._automatic_system_input_candidates.insert(0, fallback_input)
         if bool(self._config.get("unified_virtual_input_enabled", False)):
             unified_output_name = str(
                 self._config.get("output_endpoint_name", "")
@@ -233,9 +275,23 @@ class RC003App:
                     self._config.get("unified_on_demand_enabled", True)
                 )
                 and audio_output.is_cable_input_endpoint(unified_output_name),
+                automatic_candidates=(
+                    self._automatic_system_input_candidates
+                    if self._keyboard_source_auto_enabled
+                    else ()
+                ),
+                automatic_gain_enabled=bool(
+                    self._config.get("system_input_auto_gain_enabled", True)
+                ),
                 logger=self._logger,
                 on_remote_failure=self._on_unified_remote_failure,
             )
+        self._keyboard_source_auto_enabled = bool(
+            self._keyboard_source_auto_enabled
+            and self._unified_audio_router is not None
+            and self._keyboard_source_salt
+            and self._automatic_system_input_candidates
+        )
         self._voice_pcm_stats = PcmStats()
 
         self._supervisor = connection_supervisor.ConnectionSupervisor(
@@ -327,6 +383,9 @@ class RC003App:
             )
             return
 
+        # A previous listener can disappear while a key is still held. Do
+        # not carry that incomplete edge into the next BLE connection.
+        self._keyboard_source_pressed.clear()
         self._hid_listener = raw_input_windows.RawInputButtonListener(self._on_button_event)
         set_physical_bindings = getattr(
             self._hid_listener, "set_physical_bindings", None
@@ -336,6 +395,11 @@ class RC003App:
         set_raw_event_callback = getattr(self._hid_listener, "set_raw_event_callback", None)
         if set_raw_event_callback is not None:
             set_raw_event_callback(self._on_raw_input_event)
+        set_keyboard_source_callback = getattr(
+            self._hid_listener, "set_keyboard_source_callback", None
+        )
+        if callable(set_keyboard_source_callback):
+            set_keyboard_source_callback(self._on_keyboard_source_event)
         try:
             self._hid_listener.start(device_path)
         except raw_input_windows.RawInputUnavailableError as exc:
@@ -360,6 +424,8 @@ class RC003App:
             on_key_transform=self._transform_legacy_voice_key,
             on_key_emit=self._emit_legacy_voice_key,
             rc003_vk_codes=frozenset(raw_input_windows.KEYBOARD_VK_TO_BUTTON),
+            observe_vk_codes=self._automatic_voice_trigger_vk_codes(),
+            on_key_observed=self._on_low_level_voice_hotkey_event,
         )
         try:
             self._legacy_key_suppressor.start()
@@ -380,6 +446,217 @@ class RC003App:
         except legacy_key_suppressor_windows.LegacyKeySuppressorUnavailableError as exc:
             self._logger.warning("startup: RC003 voice legacy-key guard unavailable: %s", exc)
             self._legacy_key_suppressor = None
+
+    def _on_keyboard_source_event(
+        self, event: raw_input_windows.RawInputEvent
+    ) -> None:
+        """Select a configured system mic before the host shortcut arrives.
+
+        This callback shares the RC003 Raw Input window because Windows
+        permits only one target window per process/keyboard usage class.
+        It stores and compares only an install-salted fingerprint; the raw
+        device path never leaves this call.
+        """
+
+        router = self._unified_audio_router
+        if (
+            not self._keyboard_source_auto_enabled
+            or router is None
+            or not event.device_path
+            or time.monotonic() < self._automatic_closing_until
+        ):
+            return
+        identity = (str(event.device_path), int(event.vkey), int(event.make_code))
+        if not event.is_pressed:
+            self._keyboard_source_pressed.discard(identity)
+            return
+        if identity in self._keyboard_source_pressed:
+            return
+        self._keyboard_source_pressed.add(identity)
+
+        ll_flags = (
+            key_origin_probe_windows.LLKHF_EXTENDED
+            if int(event.flags) & key_origin_probe_windows.RI_KEY_E0
+            else 0
+        )
+        token = hotkey_capture_windows.token_for_keyboard_event(
+            int(event.vkey), int(event.make_code), ll_flags
+        )
+        trigger_aliases = key_origin_probe_windows._token_aliases(
+            self._voice_hotkey.key.casefold()
+        )
+        if token not in trigger_aliases:
+            return
+
+        source_hash = key_origin_probe_windows.anonymous_device_fingerprint(
+            str(event.device_path), salt=self._keyboard_source_salt
+        )
+        # A Raw Input device is not automatically a physical keyboard: some
+        # remote-control products expose a virtual keyboard device and others
+        # expose no device at all. Only use the old local/remote fingerprints
+        # when they are actually known; otherwise let live microphone levels
+        # decide across every candidate.
+        injected = None
+        if self._remote_keyboard_source_hash and (
+            source_hash == self._remote_keyboard_source_hash
+        ):
+            injected = True
+        elif self._local_keyboard_source_hash and (
+            source_hash == self._local_keyboard_source_hash
+        ):
+            injected = False
+        candidates = microphone_auto_select.candidates_for_keyboard_origin(
+            self._automatic_system_input_candidates,
+            injected=injected,
+        )
+        fallback = self._preferred_automatic_fallback(
+            candidates, injected=injected
+        )
+        request_automatic = getattr(
+            router, "request_automatic_system_input", None
+        )
+        if callable(request_automatic) and request_automatic(
+            source_hash, candidates, fallback=fallback
+        ):
+            self._logger.info(
+                "automatic system microphone activity check started"
+            )
+
+    def _automatic_voice_trigger_vk_codes(self) -> frozenset[int]:
+        """Resolve the configured trigger key for the hook fallback."""
+
+        if not self._keyboard_source_auto_enabled:
+            return frozenset()
+        try:
+            return frozenset(
+                win32_keys.resolve_vk_codes((self._voice_hotkey.key,))
+            )
+        except (ValueError, TypeError):
+            return frozenset()
+
+    def _on_low_level_voice_hotkey_event(
+        self,
+        vk_code: int,
+        scan_code: int,
+        flags: int,
+        is_pressed: bool,
+    ) -> None:
+        """Start automatic mic selection when Raw Input has no source edge.
+
+        Remote-control software may inject a shortcut without exposing a
+        Raw Input device path, and another keyboard registration can also
+        hide the path.  Microphone choice is still based on live audio, so a
+        generic per-shortcut cache key is sufficient as a safe fallback.
+        """
+
+        router = self._unified_audio_router
+        if not self._keyboard_source_auto_enabled or router is None:
+            return
+        token = hotkey_capture_windows.token_for_keyboard_event(
+            int(vk_code),
+            int(scan_code),
+            (
+                key_origin_probe_windows.LLKHF_EXTENDED
+                if int(flags) & legacy_key_suppressor_windows.LLKHF_EXTENDED
+                else 0
+            ),
+        )
+        if token not in key_origin_probe_windows._token_aliases(
+            self._voice_hotkey.key.casefold()
+        ):
+            return
+        if not is_pressed:
+            self._automatic_fallback_key_pressed = False
+            return
+        if self._automatic_fallback_key_pressed:
+            return
+        self._automatic_fallback_key_pressed = True
+        if self._voice.trigger_mode in {
+            key_mapping.VoiceTriggerMode.TYPELESS,
+            key_mapping.VoiceTriggerMode.TOGGLE,
+        }:
+            if self._automatic_shortcut_session_active:
+                self._automatic_shortcut_session_active = False
+                self._automatic_closing_until = time.monotonic() + 0.25
+                finish_automatic = getattr(
+                    router, "finish_automatic_system_input", None
+                )
+                if callable(finish_automatic):
+                    finish_automatic()
+                self._logger.info(
+                    "automatic system microphone check skipped for closing shortcut"
+                )
+                return
+            self._automatic_shortcut_session_active = True
+            self._automatic_closing_until = 0.0
+        # LLKHF_INJECTED=True is conclusive, but False is not: UU, ToDesk and
+        # similar products may intentionally present their input as an ordinary
+        # keyboard event. Probe all microphones for an unmarked hook event.
+        injected = (
+            True
+            if int(flags) & legacy_key_suppressor_windows.LLKHF_INJECTED
+            else None
+        )
+        candidates = microphone_auto_select.candidates_for_keyboard_origin(
+            self._automatic_system_input_candidates,
+            injected=injected,
+        )
+        fallback = self._preferred_automatic_fallback(
+            candidates, injected=injected
+        )
+        request_automatic = getattr(
+            router, "request_automatic_system_input", None
+        )
+        if callable(request_automatic) and request_automatic(
+            "shortcut:"
+            f"{'injected' if injected is True else 'unknown'}:"
+            f"{self._voice_hotkey.key.casefold()}",
+            candidates,
+            fallback=fallback,
+        ):
+            self._logger.info(
+                "automatic system microphone activity check started via "
+                "%s keyboard-hook fallback",
+                "injected" if injected is True else "unclassified",
+            )
+
+    def _preferred_automatic_fallback(
+        self,
+        candidates,
+        *,
+        injected: Optional[bool],
+    ):
+        """Choose an immediate source while live level comparison starts."""
+
+        if not candidates:
+            return None
+        if injected is None:
+            # An unclassified hook edge is not evidence for either a physical
+            # or remote-control source. In particular, forcing the configured
+            # physical microphone here can replace a correctly selected UU
+            # source on every subsequent remote RAlt press. No explicit
+            # fallback lets UnifiedAudioRouter keep its current live source;
+            # aggregate speech evidence may still switch to any candidate.
+            return None
+        configured = audio_output.AudioEndpoint(
+            str(self._config.get("system_input_endpoint_name", "")),
+            str(self._config.get("system_input_endpoint_host_api", "")),
+        )
+        configured_key = microphone_auto_select.endpoint_key(configured)
+        if (
+            (
+                injected is None
+                or microphone_auto_select.is_virtual_microphone_candidate(configured)
+                == injected
+            )
+            and configured_key
+            in {
+                microphone_auto_select.endpoint_key(endpoint)
+                for endpoint in candidates
+            }
+        ):
+            return configured
+        return candidates[0]
 
     def _start_hid_report_tap(self) -> None:
         """Start the upstream-derived tap for usages Windows drops.
@@ -567,6 +844,9 @@ class RC003App:
             try:
                 self._hid_listener.stop()
                 self._hid_listener = None
+                self._keyboard_source_pressed.clear()
+                self._automatic_fallback_key_pressed = False
+                self._automatic_shortcut_session_active = False
             except Exception:
                 self._logger.exception("cleanup: stopping the Raw Input listener failed")
                 failures.append("Raw Input listener did not stop; owner retained")

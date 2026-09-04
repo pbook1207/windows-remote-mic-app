@@ -98,6 +98,7 @@ import atexit
 import gc
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -110,8 +111,10 @@ from . import (
     device_catalog,
     hotkey,
     hotkey_capture_windows,
+    key_origin_probe_windows,
     key_mapping,
     logging_setup,
+    microphone_auto_select,
     remote_layout,
     raw_input_windows,
     resources,
@@ -393,6 +396,7 @@ def _load_qt_classes() -> dict:
             Property,
             QAbstractListModel,
             QByteArray,
+            QEvent,
             QModelIndex,
             QObject,
             Qt,
@@ -655,6 +659,12 @@ def _load_qt_classes() -> dict:
         unifiedOnDemandEnabledChanged = Signal()
         systemInputOptionsChanged = Signal()
         selectedSystemInputIndexChanged = Signal()
+        showAllSystemInputEndpointsChanged = Signal()
+        systemInputAutoSelectEnabledChanged = Signal()
+        systemInputAutoGainEnabledChanged = Signal()
+        selectedLocalSystemInputIndexChanged = Signal()
+        selectedRemoteSystemInputIndexChanged = Signal()
+        keyboardSourceRoutingStatusTextChanged = Signal()
         unifiedAudioStatusTextChanged = Signal()
         launchStatusTextChanged = Signal()
         bridgeActionTextChanged = Signal()
@@ -694,6 +704,8 @@ def _load_qt_classes() -> dict:
             self._model = model
             self._config_root = config.config_root()
             self._config = config.load_config(config.config_path(self._config_root))
+            if not self._config.get("keyboard_source_hash_salt"):
+                self._config["keyboard_source_hash_salt"] = uuid.uuid4().hex
             self._bindings = config.load_key_bindings(
                 config.key_bindings_path(self._config_root)
             )
@@ -768,7 +780,16 @@ def _load_qt_classes() -> dict:
             ):
                 self._unified_on_demand_enabled = False
             self._system_input_options: List[str] = []
+            self._show_all_system_input_endpoints = False
             self._selected_system_input_index = -1
+            self._selected_local_system_input_index = -1
+            self._selected_remote_system_input_index = -1
+            self._system_input_auto_select_enabled = bool(
+                self._config.get("system_input_auto_select_enabled", False)
+            )
+            self._system_input_auto_gain_enabled = bool(
+                self._config.get("system_input_auto_gain_enabled", True)
+            )
             self._unified_audio_status_text = ""
             self._refresh_system_input_options()
             self._refresh_unified_audio_status()
@@ -826,6 +847,24 @@ def _load_qt_classes() -> dict:
             )
             return audio_output.is_cable_input_endpoint(name)
 
+        def _saved_system_input_display(self, prefix: str = "") -> str:
+            key_prefix = f"{prefix}_" if prefix else ""
+            name = str(
+                self._config.get(f"{key_prefix}system_input_endpoint_name", "")
+            )
+            if not name:
+                return ""
+            return settings_ui._endpoint_display(
+                audio_output.AudioEndpoint(
+                    name=name,
+                    host_api=str(
+                        self._config.get(
+                            f"{key_prefix}system_input_endpoint_host_api", ""
+                        )
+                    ),
+                )
+            )
+
         def _refresh_system_input_options(self, preferred_display: str = "") -> None:
             try:
                 endpoints = [
@@ -833,26 +872,69 @@ def _load_qt_classes() -> dict:
                     for endpoint in audio_output.enumerate_input_endpoints()
                     if not audio_output.is_cable_output_endpoint(endpoint.name)
                 ]
-                options = [settings_ui._endpoint_display(e) for e in endpoints]
             except audio_output.AudioOutputUnavailableError:
-                options = []
-            saved_name = str(self._config.get("system_input_endpoint_name", ""))
-            saved_display = preferred_display
-            if not saved_display and saved_name:
-                saved_display = settings_ui._endpoint_display(
-                    audio_output.AudioEndpoint(
-                        name=saved_name,
-                        host_api=str(
-                            self._config.get("system_input_endpoint_host_api", "")
-                        ),
-                    )
+                endpoints = []
+            saved_display = preferred_display or self._saved_system_input_display()
+            local_display = self._saved_system_input_display("local")
+            remote_display = self._saved_system_input_display("remote")
+            all_options = [settings_ui._endpoint_display(e) for e in endpoints]
+            for display in (saved_display, local_display, remote_display):
+                if display and display not in all_options:
+                    all_options.append(display)
+            options = (
+                all_options
+                if self._show_all_system_input_endpoints
+                else settings_ui.compact_system_input_endpoint_options(
+                    endpoints, current_display=saved_display
                 )
-            if saved_display and saved_display not in options:
-                options = [saved_display] + options
+            )
+            for display in (local_display, remote_display):
+                if display and display not in options:
+                    options.append(display)
             self._system_input_options = options
             self._selected_system_input_index = (
                 options.index(saved_display) if saved_display in options else -1
             )
+            if self._selected_system_input_index < 0 and options:
+                # Automatic mode needs a safe immediate/fallback source for
+                # the first few audio blocks while live activity is sampled.
+                # Choose the first compact recommended endpoint without
+                # changing the Windows system default device.
+                self._selected_system_input_index = 0
+            self._selected_local_system_input_index = (
+                options.index(local_display) if local_display in options else -1
+            )
+            self._selected_remote_system_input_index = (
+                options.index(remote_display) if remote_display in options else -1
+            )
+
+        def adopt_keyboard_source_fingerprints(
+            self, local_source_hash: str, remote_source_hash: str
+        ) -> None:
+            """Stage any newly learned anonymous sources for Save.
+
+            The two arguments are labels from the compatibility comparison
+            test, not permanent local/remote slots. Re-running that test with
+            another keyboard or remote-control program appends more unique
+            sources instead of replacing the first pair.
+            """
+
+            self._config["local_keyboard_source_hash"] = str(local_source_hash)
+            self._config["remote_keyboard_source_hash"] = str(remote_source_hash)
+            profiles = self._config.get("keyboard_source_profiles", [])
+            profiles = list(profiles) if isinstance(profiles, list) else []
+            existing = {
+                str(profile.get("source_hash", ""))
+                for profile in profiles
+                if isinstance(profile, dict)
+            }
+            for source_hash in (local_source_hash, remote_source_hash):
+                source_hash = str(source_hash).strip()
+                if source_hash and source_hash not in existing:
+                    profiles.append({"source_hash": source_hash})
+                    existing.add(source_hash)
+            self._config["keyboard_source_profiles"] = profiles
+            self.keyboardSourceRoutingStatusTextChanged.emit()
 
         def _refresh_unified_audio_status(self) -> None:
             text = unified_audio_router.describe_status(
@@ -1035,6 +1117,16 @@ def _load_qt_classes() -> dict:
                 if 0 <= self._selected_system_input_index < len(self._system_input_options)
                 else ""
             )
+            local_system_input_display = (
+                self._system_input_options[self._selected_local_system_input_index]
+                if 0 <= self._selected_local_system_input_index < len(self._system_input_options)
+                else ""
+            )
+            remote_system_input_display = (
+                self._system_input_options[self._selected_remote_system_input_index]
+                if 0 <= self._selected_remote_system_input_index < len(self._system_input_options)
+                else ""
+            )
             try:
                 new_config, new_bindings = settings_ui.build_save_model(
                     button_display_map=self._model.to_display_map(),
@@ -1051,6 +1143,11 @@ def _load_qt_classes() -> dict:
                     unified_virtual_input_enabled=self._unified_virtual_input_enabled,
                     unified_on_demand_enabled=self._unified_on_demand_enabled,
                     system_input_endpoint_display_text=system_input_display,
+                    system_input_auto_select_enabled=self._system_input_auto_select_enabled,
+                    system_input_auto_gain_enabled=self._system_input_auto_gain_enabled,
+                    system_input_candidate_display_texts=self._system_input_options,
+                    local_system_input_endpoint_display_text=local_system_input_display,
+                    remote_system_input_endpoint_display_text=remote_system_input_display,
                 )
             except settings_ui.SettingsValidationError as exc:
                 title = f"「{exc.button_id}」映射无效" if exc.button_id else "设置无效"
@@ -1097,6 +1194,9 @@ def _load_qt_classes() -> dict:
             )
             self._unified_on_demand_enabled = bool(
                 saved_config.get("unified_on_demand_enabled", True)
+            )
+            self._system_input_auto_gain_enabled = bool(
+                saved_config.get("system_input_auto_gain_enabled", True)
             )
             self._refresh_unified_audio_status()
             self._adopt_saved_bindings(saved_bindings)
@@ -1316,6 +1416,133 @@ def _load_qt_classes() -> dict:
             _get_selected_system_input_index,
             _set_selected_system_input_index,
             notify=selectedSystemInputIndexChanged,
+        )
+
+        def _get_show_all_system_input_endpoints(self) -> bool:
+            return self._show_all_system_input_endpoints
+
+        def _set_show_all_system_input_endpoints(self, value: bool) -> None:
+            value = bool(value)
+            if value == self._show_all_system_input_endpoints:
+                return
+            current_display = (
+                self._system_input_options[self._selected_system_input_index]
+                if 0 <= self._selected_system_input_index < len(self._system_input_options)
+                else ""
+            )
+            self._show_all_system_input_endpoints = value
+            self._refresh_system_input_options(current_display)
+            self.showAllSystemInputEndpointsChanged.emit()
+            self.systemInputOptionsChanged.emit()
+            self.selectedSystemInputIndexChanged.emit()
+            self.selectedLocalSystemInputIndexChanged.emit()
+            self.selectedRemoteSystemInputIndexChanged.emit()
+
+        showAllSystemInputEndpoints = Property(
+            bool,
+            _get_show_all_system_input_endpoints,
+            _set_show_all_system_input_endpoints,
+            notify=showAllSystemInputEndpointsChanged,
+        )
+
+        def _get_system_input_auto_select_enabled(self) -> bool:
+            return self._system_input_auto_select_enabled
+
+        def _set_system_input_auto_select_enabled(self, value: bool) -> None:
+            value = bool(value)
+            if value != self._system_input_auto_select_enabled:
+                self._system_input_auto_select_enabled = value
+                self.systemInputAutoSelectEnabledChanged.emit()
+
+        systemInputAutoSelectEnabled = Property(
+            bool,
+            _get_system_input_auto_select_enabled,
+            _set_system_input_auto_select_enabled,
+            notify=systemInputAutoSelectEnabledChanged,
+        )
+
+        def _get_system_input_auto_gain_enabled(self) -> bool:
+            return self._system_input_auto_gain_enabled
+
+        def _set_system_input_auto_gain_enabled(self, value: bool) -> None:
+            value = bool(value)
+            if value != self._system_input_auto_gain_enabled:
+                self._system_input_auto_gain_enabled = value
+                self.systemInputAutoGainEnabledChanged.emit()
+
+        systemInputAutoGainEnabled = Property(
+            bool,
+            _get_system_input_auto_gain_enabled,
+            _set_system_input_auto_gain_enabled,
+            notify=systemInputAutoGainEnabledChanged,
+        )
+
+        def _get_selected_local_system_input_index(self) -> int:
+            return self._selected_local_system_input_index
+
+        def _set_selected_local_system_input_index(self, value: int) -> None:
+            if value != self._selected_local_system_input_index:
+                self._selected_local_system_input_index = value
+                self.selectedLocalSystemInputIndexChanged.emit()
+
+        selectedLocalSystemInputIndex = Property(
+            int,
+            _get_selected_local_system_input_index,
+            _set_selected_local_system_input_index,
+            notify=selectedLocalSystemInputIndexChanged,
+        )
+
+        def _get_selected_remote_system_input_index(self) -> int:
+            return self._selected_remote_system_input_index
+
+        def _set_selected_remote_system_input_index(self, value: int) -> None:
+            if value != self._selected_remote_system_input_index:
+                self._selected_remote_system_input_index = value
+                self.selectedRemoteSystemInputIndexChanged.emit()
+
+        selectedRemoteSystemInputIndex = Property(
+            int,
+            _get_selected_remote_system_input_index,
+            _set_selected_remote_system_input_index,
+            notify=selectedRemoteSystemInputIndexChanged,
+        )
+
+        def _get_keyboard_source_routing_status_text(self) -> str:
+            profiles = self._config.get("keyboard_source_profiles", [])
+            source_hashes = {
+                str(profile.get("source_hash", ""))
+                for profile in profiles
+                if isinstance(profile, dict) and profile.get("source_hash")
+            }
+            for legacy_key in (
+                "local_keyboard_source_hash",
+                "remote_keyboard_source_hash",
+            ):
+                value = str(self._config.get(legacy_key, "")).strip()
+                if value:
+                    source_hashes.add(value)
+            candidate_count = len(
+                microphone_auto_select.recommended_candidates(
+                    audio_output.AudioEndpoint(
+                        *settings_ui._parse_endpoint_display(display)
+                    )
+                    for display in self._system_input_options
+                )
+            )
+            learned = (
+                f"已记录 {len(source_hashes)} 个按键来源；"
+                if source_hashes
+                else "无需预先区分本地或远程；"
+            )
+            return (
+                f"{learned}每次按下语音键后，将在 {candidate_count} 个推荐麦克风中"
+                "短暂检测声音，并沿用最近成功的选择。"
+            )
+
+        keyboardSourceRoutingStatusText = Property(
+            str,
+            _get_keyboard_source_routing_status_text,
+            notify=keyboardSourceRoutingStatusTextChanged,
         )
 
         def _get_unified_audio_status_text(self) -> str:
@@ -1563,6 +1790,8 @@ def _load_qt_classes() -> dict:
             self._refresh_system_input_options(current)
             self.systemInputOptionsChanged.emit()
             self.selectedSystemInputIndexChanged.emit()
+            self.selectedLocalSystemInputIndexChanged.emit()
+            self.selectedRemoteSystemInputIndexChanged.emit()
 
         @Slot(bool)
         def setAutostartEnabled(self, enabled: bool) -> None:
@@ -2033,12 +2262,14 @@ def _load_qt_classes() -> dict:
         driverStatusMessageChanged = Signal()
         driverInfoMessageChanged = Signal()
         driverErrorMessageChanged = Signal()
+        keyOriginDiagnosticChanged = Signal()
         # Internal only - never connected to from QML. Carries a
         # windows_diagnostics.DiagnosticsReport (or None on an unexpected
         # worker-thread exception) back from the background thread to this
         # object's own (GUI) thread - see module docstring for why a plain
         # Signal(object) connection is sufficient here.
         _diagnosticsReady = Signal(object)
+        _keyOriginEvent = Signal(object)
 
         def __init__(self, settings_controller: "SettingsController", config_root, parent=None) -> None:
             super().__init__(parent)
@@ -2050,8 +2281,53 @@ def _load_qt_classes() -> dict:
             self._driver_status_message = ""
             self._driver_info_message = ""
             self._driver_error_message = ""
+            self._key_origin_probe = None
+            self._key_origin_state = "idle"
+            self._key_origin_status_text = (
+                "用于判断 Windows 能否区分目标电脑的实体键盘和当前远程控制输入；尚未开始检测。"
+            )
+            self._key_origin_result_kind = "neutral"
+            self._key_origin_local_low = []
+            self._key_origin_local_raw = []
+            self._key_origin_local_async = []
+            self._key_origin_local_foreground = []
+            self._key_origin_local_hotkey = []
+            self._key_origin_remote_low = []
+            self._key_origin_remote_raw = []
+            self._key_origin_remote_async = []
+            self._key_origin_remote_foreground = []
+            self._key_origin_remote_hotkey = []
             self._diagnosticsReady.connect(self._on_diagnostics_ready)
+            self._keyOriginEvent.connect(self._on_key_origin_event)
             self.refreshDiagnostics()
+
+        def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+            """Observe only the selected shortcut when this window is focused.
+
+            This fourth diagnostic channel answers whether a remote client
+            sends its keyboard input only as foreground-window messages. It
+            is intentionally not presented as usable by the background
+            bridge; compare_origin_stages() reports that limitation.
+            """
+
+            probe = self._key_origin_probe
+            if probe is not None and self._key_origin_state in ("local", "remote"):
+                event_type = event.type()
+                if event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                    try:
+                        handled = probe.handle_foreground_key_event(
+                            native_vk=int(event.nativeVirtualKey()),
+                            native_scan_code=int(event.nativeScanCode()),
+                            qt_key=int(event.key()),
+                            is_press=event_type == QEvent.Type.KeyPress,
+                            is_auto_repeat=bool(event.isAutoRepeat()),
+                        )
+                    except Exception:  # noqa: BLE001 - never break Qt dispatch
+                        handled = False
+                    if handled:
+                        event.accept()
+                        return True
+            return super().eventFilter(watched, event)
 
         # -- internal helpers -------------------------------------------------
 
@@ -2170,6 +2446,47 @@ def _load_qt_classes() -> dict:
             str, _get_driver_error_message, notify=driverErrorMessageChanged
         )
 
+        def _get_key_origin_state(self) -> str:
+            return self._key_origin_state
+
+        keyOriginState = Property(
+            str, _get_key_origin_state, notify=keyOriginDiagnosticChanged
+        )
+
+        def _get_key_origin_status_text(self) -> str:
+            return self._key_origin_status_text
+
+        keyOriginStatusText = Property(
+            str, _get_key_origin_status_text, notify=keyOriginDiagnosticChanged
+        )
+
+        def _get_key_origin_result_kind(self) -> str:
+            return self._key_origin_result_kind
+
+        keyOriginResultKind = Property(
+            str, _get_key_origin_result_kind, notify=keyOriginDiagnosticChanged
+        )
+
+        def _get_key_origin_active(self) -> bool:
+            return self._key_origin_state in ("local", "remote")
+
+        keyOriginActive = Property(
+            bool, _get_key_origin_active, notify=keyOriginDiagnosticChanged
+        )
+
+        def _get_key_origin_action_text(self) -> str:
+            if self._key_origin_state == "local":
+                return "完成实体键盘，检测远程控制"
+            if self._key_origin_state == "remote":
+                return "完成远程控制输入并比较"
+            if self._key_origin_state in ("done", "error"):
+                return "重新检测"
+            return "开始检测"
+
+        keyOriginActionText = Property(
+            str, _get_key_origin_action_text, notify=keyOriginDiagnosticChanged
+        )
+
         # -- slots ----------------------------------------------------------
 
         def _emit_diagnostics_ready(self, report) -> None:
@@ -2184,6 +2501,300 @@ def _load_qt_classes() -> dict:
             """
 
             self._diagnosticsReady.emit(report)
+
+        def _key_origin_stage_counts(self) -> tuple[int, int]:
+            return (
+                key_origin_probe_windows.stage_press_count(
+                    key_origin_probe_windows.OriginStageSamples(
+                        tuple(self._key_origin_local_low),
+                        tuple(self._key_origin_local_raw),
+                        tuple(self._key_origin_local_async),
+                        tuple(self._key_origin_local_foreground),
+                        tuple(self._key_origin_local_hotkey),
+                    )
+                ),
+                key_origin_probe_windows.stage_press_count(
+                    key_origin_probe_windows.OriginStageSamples(
+                        tuple(self._key_origin_remote_low),
+                        tuple(self._key_origin_remote_raw),
+                        tuple(self._key_origin_remote_async),
+                        tuple(self._key_origin_remote_foreground),
+                        tuple(self._key_origin_remote_hotkey),
+                    )
+                ),
+            )
+
+        def _key_origin_channel_summary(self, state: str) -> str:
+            low_events = (
+                self._key_origin_local_low
+                if state == "local"
+                else self._key_origin_remote_low
+            )
+            raw_events = (
+                self._key_origin_local_raw
+                if state == "local"
+                else self._key_origin_remote_raw
+            )
+            async_events = (
+                self._key_origin_local_async
+                if state == "local"
+                else self._key_origin_remote_async
+            )
+            foreground_events = (
+                self._key_origin_local_foreground
+                if state == "local"
+                else self._key_origin_remote_foreground
+            )
+            hotkey_events = (
+                self._key_origin_local_hotkey
+                if state == "local"
+                else self._key_origin_remote_hotkey
+            )
+            raw_count = key_origin_probe_windows.stage_press_count(
+                key_origin_probe_windows.OriginStageSamples((), tuple(raw_events))
+            )
+            probe = self._key_origin_probe
+            hotkey_capability = (
+                "可注册"
+                if probe is not None
+                and bool(getattr(probe, "global_hotkey_available", False))
+                else "不可注册/被占用"
+            )
+            observed_tokens = sorted(
+                {
+                    str(event.token)
+                    for event in (
+                        list(low_events)
+                        + list(raw_events)
+                        + list(async_events)
+                        + list(hotkey_events)
+                        + list(foreground_events)
+                    )
+                }
+            )
+            token_detail = (
+                f"，识别键 {'/'.join(observed_tokens)}" if observed_tokens else ""
+            )
+            return (
+                f"硬件通道 {raw_count}，系统通道 {len(low_events)}，"
+                f"按键状态 {len(async_events)}，全局热键 {len(hotkey_events)}"
+                f"（{hotkey_capability}），前台窗口 {len(foreground_events)}"
+                f"{token_detail}"
+            )
+
+        def _set_key_origin_message(self, text: str, *, kind: str = "neutral") -> None:
+            self._key_origin_status_text = text
+            self._key_origin_result_kind = kind
+            self.keyOriginDiagnosticChanged.emit()
+
+        def _stop_key_origin_probe(self) -> None:
+            probe = self._key_origin_probe
+            self._key_origin_probe = None
+            if probe is None:
+                return
+            probe.stop()
+
+        def _on_key_origin_event(self, event) -> None:
+            """Receive one anonymized event on the Qt GUI thread."""
+
+            state = self._key_origin_state
+            if state not in ("local", "remote"):
+                return
+            low_events = (
+                self._key_origin_local_low if state == "local"
+                else self._key_origin_remote_low
+            )
+            raw_events = (
+                self._key_origin_local_raw if state == "local"
+                else self._key_origin_remote_raw
+            )
+            async_events = (
+                self._key_origin_local_async
+                if state == "local"
+                else self._key_origin_remote_async
+            )
+            foreground_events = (
+                self._key_origin_local_foreground
+                if state == "local"
+                else self._key_origin_remote_foreground
+            )
+            hotkey_events = (
+                self._key_origin_local_hotkey
+                if state == "local"
+                else self._key_origin_remote_hotkey
+            )
+            if isinstance(event, key_origin_probe_windows.LowLevelOriginEvent):
+                low_events.append(event)
+            elif isinstance(event, key_origin_probe_windows.RawOriginEvent):
+                raw_events.append(event)
+            elif isinstance(event, key_origin_probe_windows.AsyncOriginEvent):
+                async_events.append(event)
+            elif isinstance(event, key_origin_probe_windows.ForegroundOriginEvent):
+                foreground_events.append(event)
+            elif isinstance(event, key_origin_probe_windows.HotkeyMessageOriginEvent):
+                hotkey_events.append(event)
+            else:
+                return
+
+            local_count, remote_count = self._key_origin_stage_counts()
+            if state == "local":
+                self._set_key_origin_message(
+                    f"实体键盘已记录 {local_count}/5 次（{self._key_origin_channel_summary('local')}）。"
+                    "请继续在目标电脑的实体键盘上按当前第一语音快捷键。"
+                )
+            else:
+                self._set_key_origin_message(
+                    f"远程控制输入已记录 {remote_count}/5 次（{self._key_origin_channel_summary('remote')}）。"
+                    "请继续通过当前远程控制软件按同一快捷键。"
+                )
+
+        @Slot()
+        def advanceKeyOriginDiagnostic(self) -> None:
+            """Start/advance the two explicitly user-labelled rounds."""
+
+            if self._key_origin_state not in ("local", "remote"):
+                try:
+                    self._stop_key_origin_probe()
+                except key_origin_probe_windows.KeyOriginProbeUnavailableError:
+                    pass
+                self._key_origin_local_low = []
+                self._key_origin_local_raw = []
+                self._key_origin_local_async = []
+                self._key_origin_local_foreground = []
+                self._key_origin_local_hotkey = []
+                self._key_origin_remote_low = []
+                self._key_origin_remote_raw = []
+                self._key_origin_remote_async = []
+                self._key_origin_remote_foreground = []
+                self._key_origin_remote_hotkey = []
+                shortcut = str(self._settings_controller.hotkeyText).strip()
+                try:
+                    try:
+                        probe = key_origin_probe_windows.KeyOriginProbe(
+                            shortcut,
+                            self._keyOriginEvent.emit,
+                            device_salt=str(
+                                self._settings_controller._config.get(
+                                    "keyboard_source_hash_salt", ""
+                                )
+                            ),
+                        )
+                    except TypeError:
+                        # Compatibility for injected/legacy probe adapters;
+                        # production KeyOriginProbe always accepts the salt.
+                        probe = key_origin_probe_windows.KeyOriginProbe(
+                            shortcut, self._keyOriginEvent.emit
+                        )
+                    probe.start()
+                except Exception as exc:  # noqa: BLE001 - keep the QML slot safe
+                    self._key_origin_state = "error"
+                    self._set_key_origin_message(
+                        f"按键来源检测无法启动：{exc}", kind="error"
+                    )
+                    return
+                self._key_origin_probe = probe
+                self._key_origin_state = "local"
+                self._set_key_origin_message(
+                    f"第一步：请在目标电脑的实体键盘上按 5 次“{shortcut}”。检测期间该快捷键不会传给其他软件。"
+                )
+                return
+
+            local_count, remote_count = self._key_origin_stage_counts()
+            if self._key_origin_state == "local":
+                if local_count < 5:
+                    self._set_key_origin_message(
+                        f"实体键盘目前只有 {local_count}/5 次，请完成后再进入下一步。"
+                    )
+                    return
+                self._key_origin_state = "remote"
+                self._set_key_origin_message(
+                    "第二步：先点击本设置窗口使其获得焦点，再通过当前远程控制软件按 5 次同一个快捷键；请不要使用目标电脑的实体键盘。"
+                )
+                return
+
+            if remote_count < 5:
+                self._set_key_origin_message(
+                    f"远程控制输入目前只有 {remote_count}/5 次，请完成后再比较。"
+                )
+                return
+
+            try:
+                self._stop_key_origin_probe()
+                result = key_origin_probe_windows.compare_origin_stages(
+                    key_origin_probe_windows.OriginStageSamples(
+                        tuple(self._key_origin_local_low),
+                        tuple(self._key_origin_local_raw),
+                        tuple(self._key_origin_local_async),
+                        tuple(self._key_origin_local_foreground),
+                        tuple(self._key_origin_local_hotkey),
+                    ),
+                    key_origin_probe_windows.OriginStageSamples(
+                        tuple(self._key_origin_remote_low),
+                        tuple(self._key_origin_remote_raw),
+                        tuple(self._key_origin_remote_async),
+                        tuple(self._key_origin_remote_foreground),
+                        tuple(self._key_origin_remote_hotkey),
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the QML slot safe
+                self._key_origin_state = "error"
+                self._set_key_origin_message(
+                    f"比较按键来源时出现错误：{exc}", kind="error"
+                )
+                return
+
+            self._key_origin_state = "done"
+            learned_suffix = ""
+            if result.method == "raw_input_device":
+                local_source_hash, local_stability = (
+                    key_origin_probe_windows.dominant_raw_device(
+                        self._key_origin_local_raw
+                    )
+                )
+                remote_source_hash, remote_stability = (
+                    key_origin_probe_windows.dominant_raw_device(
+                        self._key_origin_remote_raw
+                    )
+                )
+                if (
+                    local_source_hash
+                    and remote_source_hash
+                    and local_source_hash != remote_source_hash
+                    and local_stability >= 0.8
+                    and remote_stability >= 0.8
+                ):
+                    self._settings_controller.adopt_keyboard_source_fingerprints(
+                        local_source_hash, remote_source_hash
+                    )
+                    learned_suffix = (
+                        " 已暂存本次识别出的匿名来源；可重复检测其他来源，"
+                        "麦克风将由自动模式按每次声音活动决定。"
+                    )
+            result_kind = (
+                "success"
+                if result.status
+                == key_origin_probe_windows.OriginComparisonStatus.DISTINGUISHABLE
+                else "warning"
+            )
+            self._set_key_origin_message(
+                f"{result.title}。{result.detail}（实体键盘 {local_count} 次，远程控制 {remote_count} 次）。{learned_suffix}",
+                kind=result_kind,
+            )
+
+        @Slot()
+        def cancelKeyOriginDiagnostic(self) -> None:
+            try:
+                self._stop_key_origin_probe()
+            except Exception as exc:  # noqa: BLE001 - keep the QML slot safe
+                self._key_origin_state = "error"
+                self._set_key_origin_message(
+                    f"停止按键来源检测时出现错误：{exc}", kind="error"
+                )
+                return
+            self._key_origin_state = "idle"
+            self._set_key_origin_message(
+                "按键来源检测已取消；没有保存任何设备标识或按键样本。"
+            )
 
         @Slot()
         def refreshDiagnostics(self) -> None:
@@ -2393,6 +3004,7 @@ def run_settings_window() -> int:
     model = ButtonMappingModel()
     controller = SettingsController(model)
     diagnostics_controller = DiagnosticsController(controller, config.config_root())
+    app.installEventFilter(diagnostics_controller)
 
     # XRBM-035 RETRY 1 P2: DiagnosticsController's own __init__() (just
     # above) already started a real background diagnostics worker (see that
@@ -2458,8 +3070,10 @@ def run_settings_window() -> int:
 
         return app.exec()
     finally:
+        app.removeEventFilter(diagnostics_controller)
         controller.stopHotkeyCapture()
         controller.stopKeyDetection()
+        diagnostics_controller.cancelKeyOriginDiagnostic()
         # XRBM-035: called HERE, synchronously - whether app.exec()
         # returned normally, engine.load() raised, rootObjects() was empty,
         # or anything else in this block raised - and BEFORE this
