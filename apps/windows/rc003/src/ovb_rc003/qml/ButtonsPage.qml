@@ -27,6 +27,8 @@ Item {
     readonly property string textSubmitPreset: qsTr("输入文本…")
     readonly property string textSubmitPrefix: qsTr("输入文本：")
     readonly property string legacyTextSubmitPrefix: qsTr("输入文本并回车：")
+    readonly property real actionMenuWidth: 320
+    readonly property real actionMenuRowHeight: 42
 
     function isActionCategory(value) {
         return (value || "").indexOf("── ") === 0
@@ -795,8 +797,14 @@ Item {
                             Layout.minimumWidth: 0
                             editable: true
                             model: SettingsController.presetActionOptions
+                            popup: ActionMenuPopup {
+                                control: actionCombo
+                                menuWidth: root.actionMenuWidth
+                                rowHeight: root.actionMenuRowHeight
+                            }
                             delegate: ItemDelegate {
-                                width: actionCombo.width
+                                width: actionCombo.popup.availableWidth
+                                height: root.actionMenuRowHeight
                                 text: modelData
                                 enabled: !root.isActionCategory(modelData)
                                 font.bold: root.isActionCategory(modelData)
@@ -953,8 +961,14 @@ Item {
                             editable: true
                             enabled: SettingsController.canEditMappingProfile
                             model: SettingsController.presetActionOptions
+                            popup: ActionMenuPopup {
+                                control: doubleActionCombo
+                                menuWidth: root.actionMenuWidth
+                                rowHeight: root.actionMenuRowHeight
+                            }
                             delegate: ItemDelegate {
-                                width: doubleActionCombo.width
+                                width: doubleActionCombo.popup.availableWidth
+                                height: root.actionMenuRowHeight
                                 text: modelData
                                 enabled: !root.isActionCategory(modelData)
                                 font.bold: root.isActionCategory(modelData)
@@ -1021,8 +1035,14 @@ Item {
                             editable: true
                             enabled: SettingsController.canEditMappingProfile
                             model: SettingsController.presetActionOptions
+                            popup: ActionMenuPopup {
+                                control: longActionCombo
+                                menuWidth: root.actionMenuWidth
+                                rowHeight: root.actionMenuRowHeight
+                            }
                             delegate: ItemDelegate {
-                                width: longActionCombo.width
+                                width: longActionCombo.popup.availableWidth
+                                height: root.actionMenuRowHeight
                                 text: modelData
                                 enabled: !root.isActionCategory(modelData)
                                 font.bold: root.isActionCategory(modelData)

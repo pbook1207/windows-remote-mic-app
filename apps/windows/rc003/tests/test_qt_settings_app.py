@@ -238,6 +238,19 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
         self.assertIn('enabled: SettingsController.canEditMappingProfile', source)
         self.assertNotIn('text: qsTr("恢复默认映射")', source)
 
+    def test_action_menus_use_one_wide_bounded_scrollable_popup(self):
+        qml_root = Path(qt_settings_app.__file__).resolve().parent / "qml"
+        buttons_source = (qml_root / "ButtonsPage.qml").read_text(encoding="utf-8")
+        popup_source = (qml_root / "ActionMenuPopup.qml").read_text(encoding="utf-8")
+
+        self.assertEqual(buttons_source.count("popup: ActionMenuPopup"), 3)
+        self.assertIn("readonly property real actionMenuWidth: 320", buttons_source)
+        self.assertIn("property int maximumVisibleRows: 11", popup_source)
+        self.assertIn("snapMode: ListView.SnapToItem", popup_source)
+        self.assertIn("ScrollBar.vertical: ScrollBar", popup_source)
+        self.assertIn("topMargin: 8", popup_source)
+        self.assertIn("bottomMargin: 8", popup_source)
+
 
 class DiagnosticsThreadLifecycleAtExitTests(unittest.TestCase):
     """Pure-Python coverage of the diagnostics worker-thread registry and
