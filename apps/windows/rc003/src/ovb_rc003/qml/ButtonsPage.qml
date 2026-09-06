@@ -705,7 +705,7 @@ Item {
                 clip: true
                 model: ButtonMappingModel
                 cellWidth: Math.max(220, Math.floor(width / 2))
-                cellHeight: 118
+                cellHeight: 158
                 currentIndex: ButtonMappingModel.indexOfButton(SettingsController.selectedButtonId)
                 highlightFollowsCurrentItem: true
                 onCurrentIndexChanged: positionViewAtIndex(currentIndex, GridView.Contain)
@@ -755,7 +755,7 @@ Item {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
-                        anchors.bottom: mappingRow.isMic ? micHint.top : gestureRow.top
+                        anchors.bottom: mappingRow.isMic ? micHint.top : gestureRows.top
                         anchors.leftMargin: tokens.spacingSmall
                         anchors.rightMargin: tokens.spacingSmall
                         anchors.topMargin: tokens.spacingSmall
@@ -936,8 +936,8 @@ Item {
                         elide: Text.ElideRight
                     }
 
-                    RowLayout {
-                        id: gestureRow
+                    ColumnLayout {
+                        id: gestureRows
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
@@ -945,156 +945,169 @@ Item {
                         anchors.rightMargin: tokens.spacingSmall
                         anchors.bottomMargin: tokens.spacingSmall
                         visible: !mappingRow.isMic
-                        height: 38
+                        height: 78
                         spacing: tokens.spacingTiny
 
-                        Label {
-                            text: qsTr("双")
-                            color: tokens.textSecondary
-                            font.pixelSize: tokens.fontSizeSmall
-                        }
-                        ComboBox {
-                            id: doubleActionCombo
-                            objectName: "doubleActionCombo_" + mappingRow.buttonId
+                        RowLayout {
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            editable: true
-                            enabled: SettingsController.canEditMappingProfile
-                            model: SettingsController.presetActionOptions
-                            popup: ActionMenuPopup {
-                                control: doubleActionCombo
-                                menuWidth: root.actionMenuWidth
-                                rowHeight: root.actionMenuRowHeight
+                            Layout.preferredHeight: 38
+                            spacing: tokens.spacingTiny
+
+                            Label {
+                                text: qsTr("双击")
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
                             }
-                            delegate: ItemDelegate {
-                                width: doubleActionCombo.popup.availableWidth
-                                height: root.actionMenuRowHeight
-                                text: modelData
-                                enabled: !root.isActionCategory(modelData)
-                                font.bold: root.isActionCategory(modelData)
+                            ComboBox {
+                                id: doubleActionCombo
+                                objectName: "doubleActionCombo_" + mappingRow.buttonId
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                editable: true
+                                enabled: SettingsController.canEditMappingProfile
+                                model: SettingsController.presetActionOptions
+                                popup: ActionMenuPopup {
+                                    control: doubleActionCombo
+                                    menuWidth: root.actionMenuWidth
+                                    rowHeight: root.actionMenuRowHeight
+                                }
+                                delegate: ItemDelegate {
+                                    width: doubleActionCombo.popup.availableWidth
+                                    height: root.actionMenuRowHeight
+                                    text: modelData
+                                    enabled: !root.isActionCategory(modelData)
+                                    font.bold: root.isActionCategory(modelData)
+                                }
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("双击动作；配置后等待约 0.3 秒区分单击和双击")
+                                property bool _initialized: false
+                                Component.onCompleted: {
+                                    editText = mappingRow.doubleClickText
+                                    _initialized = true
+                                }
+                                onEditTextChanged: {
+                                    if (_initialized)
+                                        ButtonMappingModel.setSecondaryActionTextAt(
+                                            mappingRow.index, "double_click", editText
+                                        )
+                                }
+                                onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
+                                    mappingRow.index, "double_click", editText
+                                )
+                                onActivated: {
+                                    if (!root.isActionCategory(currentText))
+                                        ButtonMappingModel.setSecondaryActionTextAt(
+                                            mappingRow.index, "double_click", currentText
+                                        )
+                                }
                             }
-                            ToolTip.visible: hovered
-                            ToolTip.text: qsTr("双击动作；配置后等待约 0.3 秒区分单击和双击")
-                            property bool _initialized: false
-                            Component.onCompleted: {
-                                editText = mappingRow.doubleClickText
-                                _initialized = true
+                            Button {
+                                objectName: "editDoubleTextAction_" + mappingRow.buttonId
+                                visible: root.isTextSubmitAction(doubleActionCombo.editText)
+                                enabled: SettingsController.canEditMappingProfile
+                                text: qsTr("文")
+                                Layout.preferredWidth: 30
+                                Layout.minimumWidth: 28
+                                onClicked: root.openTextSubmitEditor(
+                                    mappingRow.index, "double_click", doubleActionCombo.editText
+                                )
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("编辑双击时输入的文本")
+                                Accessible.name: qsTr("编辑双击输入文本")
                             }
-                            onEditTextChanged: {
-                                if (_initialized)
-                                    ButtonMappingModel.setSecondaryActionTextAt(
-                                        mappingRow.index, "double_click", editText
-                                    )
-                            }
-                            onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
-                                mappingRow.index, "double_click", editText
-                            )
-                            onActivated: {
-                                if (!root.isActionCategory(currentText))
-                                    ButtonMappingModel.setSecondaryActionTextAt(
-                                        mappingRow.index, "double_click", currentText
-                                    )
+                            Button {
+                                objectName: "recordDoubleShortcut_" + mappingRow.buttonId
+                                enabled: SettingsController.canEditMappingProfile
+                                text: qsTr("录")
+                                Layout.preferredWidth: 30
+                                Layout.minimumWidth: 28
+                                onClicked: root.openShortcutRecorder(
+                                    mappingRow.buttonId, mappingRow.index,
+                                    mappingRow.isMic, "double_click"
+                                )
+                                Accessible.name: qsTr("录制双击") + mappingRow.displayName
                             }
                         }
-                        Button {
-                            objectName: "editDoubleTextAction_" + mappingRow.buttonId
-                            visible: root.isTextSubmitAction(doubleActionCombo.editText)
-                            enabled: SettingsController.canEditMappingProfile
-                            text: qsTr("文")
-                            Layout.preferredWidth: 30
-                            Layout.minimumWidth: 28
-                            onClicked: root.openTextSubmitEditor(
-                                mappingRow.index, "double_click", doubleActionCombo.editText
-                            )
-                            ToolTip.visible: hovered
-                            ToolTip.text: qsTr("编辑双击时输入的文本")
-                            Accessible.name: qsTr("编辑双击输入文本")
-                        }
-                        Button {
-                            objectName: "recordDoubleShortcut_" + mappingRow.buttonId
-                            enabled: SettingsController.canEditMappingProfile
-                            text: qsTr("录")
-                            Layout.preferredWidth: 30
-                            Layout.minimumWidth: 28
-                            onClicked: root.openShortcutRecorder(
-                                mappingRow.buttonId, mappingRow.index,
-                                mappingRow.isMic, "double_click"
-                            )
-                            Accessible.name: qsTr("录制双击") + mappingRow.displayName
-                        }
-                        Label {
-                            text: qsTr("长")
-                            color: tokens.textSecondary
-                            font.pixelSize: tokens.fontSizeSmall
-                        }
-                        ComboBox {
-                            id: longActionCombo
-                            objectName: "longActionCombo_" + mappingRow.buttonId
+
+                        RowLayout {
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            editable: true
-                            enabled: SettingsController.canEditMappingProfile
-                            model: SettingsController.presetActionOptions
-                            popup: ActionMenuPopup {
-                                control: longActionCombo
-                                menuWidth: root.actionMenuWidth
-                                rowHeight: root.actionMenuRowHeight
+                            Layout.preferredHeight: 38
+                            spacing: tokens.spacingTiny
+
+                            Label {
+                                text: qsTr("长按")
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
                             }
-                            delegate: ItemDelegate {
-                                width: longActionCombo.popup.availableWidth
-                                height: root.actionMenuRowHeight
-                                text: modelData
-                                enabled: !root.isActionCategory(modelData)
-                                font.bold: root.isActionCategory(modelData)
+                            ComboBox {
+                                id: longActionCombo
+                                objectName: "longActionCombo_" + mappingRow.buttonId
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                editable: true
+                                enabled: SettingsController.canEditMappingProfile
+                                model: SettingsController.presetActionOptions
+                                popup: ActionMenuPopup {
+                                    control: longActionCombo
+                                    menuWidth: root.actionMenuWidth
+                                    rowHeight: root.actionMenuRowHeight
+                                }
+                                delegate: ItemDelegate {
+                                    width: longActionCombo.popup.availableWidth
+                                    height: root.actionMenuRowHeight
+                                    text: modelData
+                                    enabled: !root.isActionCategory(modelData)
+                                    font.bold: root.isActionCategory(modelData)
+                                }
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("长按动作；按住约 0.55 秒触发并抑制单击")
+                                property bool _initialized: false
+                                Component.onCompleted: {
+                                    editText = mappingRow.longPressText
+                                    _initialized = true
+                                }
+                                onEditTextChanged: {
+                                    if (_initialized)
+                                        ButtonMappingModel.setSecondaryActionTextAt(
+                                            mappingRow.index, "long_press", editText
+                                        )
+                                }
+                                onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
+                                    mappingRow.index, "long_press", editText
+                                )
+                                onActivated: {
+                                    if (!root.isActionCategory(currentText))
+                                        ButtonMappingModel.setSecondaryActionTextAt(
+                                            mappingRow.index, "long_press", currentText
+                                        )
+                                }
                             }
-                            ToolTip.visible: hovered
-                            ToolTip.text: qsTr("长按动作；按住约 0.55 秒触发并抑制单击")
-                            property bool _initialized: false
-                            Component.onCompleted: {
-                                editText = mappingRow.longPressText
-                                _initialized = true
+                            Button {
+                                objectName: "editLongTextAction_" + mappingRow.buttonId
+                                visible: root.isTextSubmitAction(longActionCombo.editText)
+                                enabled: SettingsController.canEditMappingProfile
+                                text: qsTr("文")
+                                Layout.preferredWidth: 30
+                                Layout.minimumWidth: 28
+                                onClicked: root.openTextSubmitEditor(
+                                    mappingRow.index, "long_press", longActionCombo.editText
+                                )
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("编辑长按时输入的文本")
+                                Accessible.name: qsTr("编辑长按输入文本")
                             }
-                            onEditTextChanged: {
-                                if (_initialized)
-                                    ButtonMappingModel.setSecondaryActionTextAt(
-                                        mappingRow.index, "long_press", editText
-                                    )
+                            Button {
+                                objectName: "recordLongShortcut_" + mappingRow.buttonId
+                                enabled: SettingsController.canEditMappingProfile
+                                text: qsTr("录")
+                                Layout.preferredWidth: 30
+                                Layout.minimumWidth: 28
+                                onClicked: root.openShortcutRecorder(
+                                    mappingRow.buttonId, mappingRow.index,
+                                    mappingRow.isMic, "long_press"
+                                )
+                                Accessible.name: qsTr("录制长按") + mappingRow.displayName
                             }
-                            onAccepted: ButtonMappingModel.setSecondaryActionTextAt(
-                                mappingRow.index, "long_press", editText
-                            )
-                            onActivated: {
-                                if (!root.isActionCategory(currentText))
-                                    ButtonMappingModel.setSecondaryActionTextAt(
-                                        mappingRow.index, "long_press", currentText
-                                    )
-                            }
-                        }
-                        Button {
-                            objectName: "editLongTextAction_" + mappingRow.buttonId
-                            visible: root.isTextSubmitAction(longActionCombo.editText)
-                            enabled: SettingsController.canEditMappingProfile
-                            text: qsTr("文")
-                            Layout.preferredWidth: 30
-                            Layout.minimumWidth: 28
-                            onClicked: root.openTextSubmitEditor(
-                                mappingRow.index, "long_press", longActionCombo.editText
-                            )
-                            ToolTip.visible: hovered
-                            ToolTip.text: qsTr("编辑长按时输入的文本")
-                            Accessible.name: qsTr("编辑长按输入文本")
-                        }
-                        Button {
-                            objectName: "recordLongShortcut_" + mappingRow.buttonId
-                            enabled: SettingsController.canEditMappingProfile
-                            text: qsTr("录")
-                            Layout.preferredWidth: 30
-                            Layout.minimumWidth: 28
-                            onClicked: root.openShortcutRecorder(
-                                mappingRow.buttonId, mappingRow.index,
-                                mappingRow.isMic, "long_press"
-                            )
-                            Accessible.name: qsTr("录制长按") + mappingRow.displayName
                         }
                     }
                 }

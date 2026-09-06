@@ -250,6 +250,10 @@ class QmlTextAndAutostartContractTests(unittest.TestCase):
         self.assertIn("ScrollBar.vertical: ScrollBar", popup_source)
         self.assertIn("topMargin: 8", popup_source)
         self.assertIn("bottomMargin: 8", popup_source)
+        self.assertIn("cellHeight: 158", buttons_source)
+        self.assertIn("id: gestureRows", buttons_source)
+        self.assertIn('text: qsTr("双击")', buttons_source)
+        self.assertIn('text: qsTr("长按")', buttons_source)
 
 
 class DiagnosticsThreadLifecycleAtExitTests(unittest.TestCase):
