@@ -63,14 +63,14 @@ class VersionConsistencyTests(unittest.TestCase):
                 _PACKAGE_INIT_PATH,
             ),
         }
-        self.assertEqual({"0.2.1"}, set(versions.values()), versions)
+        self.assertEqual({"0.2.2"}, set(versions.values()), versions)
 
     def test_release_version_and_tag_are_documented_consistently(self):
-        self.assertIn("## [0.2.1]", self.changelog_text)
+        self.assertIn("## [0.2.2]", self.changelog_text)
         for text in self.readmes:
-            self.assertIn("0.2.1", text)
+            self.assertIn("0.2.2", text)
         for text in self.readmes[:2]:
-            self.assertIn("v0.2.1-windows", text)
+            self.assertIn("v0.2.2-windows", text)
 
 
 def _exec_as_top_level_no_package(path: Path, *, module_name: str) -> None:
@@ -1161,7 +1161,7 @@ class RootDocumentConsistencyTests(unittest.TestCase):
     def test_root_readme_does_not_lump_windows_in_with_planned_research(self):
         self.assertIn("Windows 版本（RC003）", self.root_readme_text)
         self.assertIn("Windows 客户端位于", self.root_readme_text)
-        self.assertIn("当前正式版 `0.2.1`", self.root_readme_text)
+        self.assertIn("当前正式版 `0.2.2`", self.root_readme_text)
         self.assertIn("不能替代", self.root_readme_text)
 
     def test_third_party_notices_does_not_falsely_deny_all_vbcable_reference(self):
@@ -1208,7 +1208,7 @@ class RootDocumentConsistencyTests(unittest.TestCase):
         # same real-device-verified Windows release.
         windows_readme_text = _README_PATH.read_text(encoding="utf-8")
         for text in (self.root_readme_text, windows_readme_text):
-            self.assertIn("0.2.1", text)
+            self.assertIn("0.2.2", text)
             self.assertIn("已通过真实硬件验收", text)
 
 
@@ -1256,7 +1256,7 @@ class ReleaseDownloadInstructionsContractTests(unittest.TestCase):
         self.assertIn(
             "https://github.com/pbook1207/windows-remote-mic-app/releases", self.text
         )
-        self.assertIn("v0.2.1-windows", self.text)
+        self.assertIn("v0.2.2-windows", self.text)
 
     def test_does_not_make_a_time_dependent_claim_about_prerelease_existence(self):
         # XRBM-027 RETRY 1 correction: a sentence saying "even if there is
@@ -1285,7 +1285,7 @@ class ReleaseDownloadInstructionsContractTests(unittest.TestCase):
         )
 
     def test_documents_unified_release_and_candidate_versioning(self):
-        self.assertIn("v0.2.1-windows", self.text)
+        self.assertIn("v0.2.2-windows", self.text)
         self.assertIn("0.3.0-rc.1", self.text)
         version_match = re.search(r'#define AppVersion "([^"]+)"', self.iss_text)
         self.assertIsNotNone(version_match)
@@ -1312,7 +1312,7 @@ class RealWindowsCiEvidenceContractTests(unittest.TestCase):
     def test_status_is_an_official_release_that_passed_real_device_acceptance(self):
         # The release completed real-device acceptance (key-by-key and
         # voice-link), while CI still cannot replace physical verification.
-        self.assertIn("Windows 正式版 0.2.1", self.readme_text)
+        self.assertIn("Windows 正式版 0.2.2", self.readme_text)
         self.assertIn("已通过真实硬件验收", self.readme_text)
         self.assertIn("不能替代真机配对、按键和语音链路验收", self.readme_text)
         self.assertNotIn("verified on real rc003 hardware", self.readme_text.lower())

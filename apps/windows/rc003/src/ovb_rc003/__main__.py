@@ -65,7 +65,7 @@ from . import __version__
 
 def _print_help() -> None:
     print(f"Remote Mic - RC003 Windows client {__version__}")
-    print("0.2.1 passed RC003 real-hardware acceptance; see README.md for scope and limits.")
+    print("0.2.2 passed RC003 real-hardware acceptance; see README.md for scope and limits.")
     print()
     print("Usage:")
     print("  python -m ovb_rc003               open the settings window (default)")
