@@ -1,6 +1,6 @@
 # Remote Mic — Windows client (RC003)
 
-> **状态：Windows 正式版 0.2.1，已通过真实硬件验收。** 本目录包含
+> **状态：Windows 正式版 0.2.2，已通过真实硬件验收。** 本目录包含
 > 跨平台协议测试，以及针对 WinRT BLE、Raw Input、SendInput 和 PortAudio 的
 > Windows CI/构建流程。CI 可以证明代码能够编译并通过 Windows API 调用契约
 > 测试；此外，本版本已在真实小米蓝牙遥控器 2 Pro / RC003 上验证：方向键、
@@ -24,7 +24,7 @@ Windows 系统录音输入页面，绝不会启动 RC003 BLE/HID/ATVV 桥接。D
 ## 中文安装与使用说明
 
 > 本节面向安装正式版的用户；后面的技术说明用于开发者和维护者。
-> 0.2.1 已完成真实 RC003 真机验收（逐键、语音链路），并完成本地与远程
+> 0.2.2 延续 0.2.1 的真实 RC003 真机验收（逐键、语音链路），并完成本地与远程
 > 系统麦克风自动切换的实际使用测试；未签名，首次运行
 > 可能触发 SmartScreen 提示。
 
@@ -61,8 +61,8 @@ Windows 系统录音输入页面，绝不会启动 RC003 BLE/HID/ATVV 桥接。D
 
   https://github.com/pbook1207/windows-remote-mic-app/releases
 
-在列表中找到 `Remote Mic RC003 for Windows 0.2.1`，其 Git 标签为
-`v0.2.1-windows`。发布说明会写清楚对应的 Windows CI 和真机验收范围。
+在列表中找到 `Remote Mic RC003 for Windows 0.2.2`，其 Git 标签为
+`v0.2.2-windows`。发布说明会写清楚对应的 Windows CI 和真机验收范围。
 
 从 0.2.0 起，程序、安装器、Python 包和资产文件统一使用同一个版本号；
 Git 标签只额外添加 `v` 前缀和 `-windows` 平台后缀。测试候选统一使用
@@ -495,11 +495,11 @@ Frida Gadget 实现；Frida 的版本、哈希和许可证见仓库根目录
 Windows 版本以正式版发布。当前正式发布：
 
 - 发布列表页：<https://github.com/pbook1207/windows-remote-mic-app/releases>
-- 程序版本：`0.2.1`
-- Git 标签：`v0.2.1-windows`
+- 程序版本：`0.2.2`
+- Git 标签：`v0.2.2-windows`
 
 正式版资产文件名、安装器 `AppVersion`、Python 包和程序显示版本统一为
-`0.2.1`；测试候选使用 `0.3.0-rc.1` 这类编号，正式发布时去掉 `-rc.<序号>`。
+`0.2.2`；测试候选使用 `0.3.0-rc.1` 这类编号，正式发布时去掉 `-rc.<序号>`。
 
 每个版本的安装器、便携版 ZIP 和 `SHA256SUMS.txt` 必须来自同一次 Windows CI
 构建；发布前已在真实 RC003 上完成配对、按键和语音链路验收，并在发布说明中
